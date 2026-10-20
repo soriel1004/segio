@@ -71,6 +71,10 @@ def mail_path(template, user):
     if '{initial}' in template and not user[0].isalnum():
         raise SafeError('invalid_identity')
     path = os.path.abspath(template.replace('{user}', user).replace('{initial}', user[0]))
+    # json loads Unicode on Python 2. Walk using native byte paths so CentOS
+    # does not implicitly decode legacy CP949 file names using its locale.
+    if sys.version_info[0] < 3 and not isinstance(path, bytes):
+        path = path.encode(sys.getfilesystemencoding() or 'utf-8')
     if os.path.realpath(path) != path or not os.path.exists(path):
         raise SafeError('mail_path_missing_or_symlink')
     return path

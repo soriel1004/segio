@@ -44,6 +44,10 @@ def create_fixture(root):
     content+=b'\nFrom synthetic@example.test Tue Oct 20 12:00:00 2026\n'+message.as_bytes()
     (mail/'inbox.mbox').write_bytes(content)
     (mail/'native.index').write_bytes(b'\x00SYNTHETIC_NATIVE_INDEX\x00')
+    if os.name!='nt':
+        descriptor=os.open(os.fsencode(mail)+b'/'+ '한글.idx'.encode('cp949'),os.O_WRONLY|os.O_CREAT,0o600)
+        with os.fdopen(descriptor,'wb') as stream:
+            stream.write(b'\x00SYNTHETIC_CP949_INDEX\x00')
     other=root/'home/o/other/mbox'
     other.mkdir(parents=True,exist_ok=True)
     (other/'inbox.mbox').write_bytes(b'From other@example.test Tue Oct 20 12:00:00 2026\nSubject: OTHER_USER_MUST_NOT_EXPORT\n\nprivate\n')
@@ -146,6 +150,11 @@ class LiveWorkerTests(unittest.TestCase):
                     self.assertIn('회의',titles)
                     self.assertIn('시험',titles)
                 self.assertEqual((folder/'mail/raw/000001.bin').read_bytes(),b'\x00SYNTHETIC_NATIVE_INDEX\x00')
+                if os.name!='nt':
+                    sources=json.loads((folder/'mail/sources.json').read_text(encoding='utf-8'))['sources']
+                    legacy=next(source for source in sources if source['name']=='한글.idx')
+                    self.assertEqual(legacy['name_bytes_hex'],'한글.idx'.encode('cp949').hex())
+                    self.assertEqual((folder/legacy['path']).read_bytes(),b'\x00SYNTHETIC_CP949_INDEX\x00')
                 self.assertEqual(next((folder/'mail/messages/00000002/attachments').iterdir()).read_bytes(),b'SYNTHETIC_ATTACHMENT')
                 for file in folder.rglob('*'):
                     if file.is_file():
@@ -160,6 +169,10 @@ class LiveWorkerTests(unittest.TestCase):
             root=Path(tmp)
             settings,_=create_fixture(root)
             self.assertEqual(worker.mail_path(settings['mail_template'],'employee'),str(root.resolve()/'home/e/employee/mbox'))
+            with patch.object(worker.sys,'version_info',(2,6,9)):
+                native=worker.mail_path(settings['mail_template'],'employee')
+                self.assertIsInstance(native,bytes)
+                self.assertEqual(os.fsdecode(native),str(root.resolve()/'home/e/employee/mbox'))
             for user in ('.','..','../other','guest'):
                 with self.assertRaises(worker.SafeError):
                     worker.mail_path(settings['mail_template'],user)
