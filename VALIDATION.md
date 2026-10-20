@@ -36,7 +36,7 @@ Windows GUI 시작 시험은 브라우저 실행 없이 ID·암호 입력 화면
 - `lssgroup.co.kr`의 HTTP/HTTPS, 사용자가 제공한 전체 로그인 URL, `192.168.0.100` 요청은 이 클라우드 연결 경로에서 403 응답을 받았습니다. 실제 사이트 자체가 중단되었다거나 사용자의 PC에서도 접속할 수 없다는 뜻은 아닙니다.
 - 운영 로그인·문서함·메일함의 실제 렌더링 구조가 업로드 배포본과 일치하는지 확인해야 합니다. 수집 중 읽음 상태·열람 이력 변경 여부도 운영 구성에 따라 다릅니다.
 - 운영 메일 원문 다운로드 경로가 노출되지 않는 경우에는 화면 보관만 가능합니다. 원문 전체 추출은 서버 지원 경로 또는 관리자 협조로 추가 검증해야 합니다.
-- Windows GUI·Chromium 설치·EXE 패키징은 Windows에서 실행 검증이 필요합니다. `build_windows.ps1` 및 GitHub Windows 워크플로를 제공했으며 이 작업에서 실행하거나 게시하지 않았습니다.
+- Windows GUI 시작·모의 서버 브라우저 수집·EXE 패키징은 최종 Actions #11에서 통과했습니다. 생성한 EXE의 현장 실행과 운영 SEGIO 연결은 별도 확인이 필요합니다.
 - 복제 환경의 계정 삭제 영향, 운영 자료 누락 대조, 서버 전체 복구용 백업은 검증하지 않았습니다.
 
 ## DB 구조 확인 SQL
@@ -98,3 +98,5 @@ PHP 통합 시험은 전역 `urlopen`과 독립된 로컬 opener를 사용하고
 원격 실행 #9에서 Linux는 성공했지만 Windows PHP 시험이 실패하여, #10에 공개 오류 annotation 출력을 추가했습니다. 실제 Windows 오류는 `session_start(): open(C:/Users/RUNNER\\sess_..., O_RDWR) failed`였습니다. 임시 경로의 `RUNNER~1`을 PHP `-d session.save_path=...`에 따옴표 없이 전달하면 INI 파서가 `~` 앞에서 값을 잘라 버립니다. 세션 경고가 헤더보다 먼저 출력되어 JSON 대신 HTML/HTTP 200을 반환했고, 이것이 보고된 HTTPError 미발생의 실제 원인이었습니다. 전역 Mock 간섭과는 별개의 문제입니다.
 
 Linux PHP CLI에도 `-d session.save_path=C:/Users/RUNNER~1/AppData/Local/Temp/fixture/sessions`처럼 Windows 형식 값을 전달하면 구문 경고와 함께 `C:/Users/RUNNER`로 잘리는 것을 재현했습니다. `/`로 시작하는 Linux 절대 경로는 CLI의 인용 처리로 같은 문제가 드러나지 않았습니다. 시험 라우터에서 `session_save_path(__DIR__.'/sessions')`로 직접 지정하여 CLI INI 파싱을 제거했습니다. 모든 PHP 통합 시험은 이제 공백과 `RUNNER~1` 구성 요소가 있는 임시 경로에서 실행하며 시작 확인에도 실제 세션 저장 성공을 요구합니다. 세션 초기화 실패는 경고가 섞인 200 대신 명확한 500으로 표시합니다. 이 변경은 시험 라우터에만 적용하며 운영 SEGIO PHP 설정을 변경하지 않습니다.
+
+수정 커밋 `fb5132b`의 [최종 Actions 실행 #11](https://github.com/soriel1004/segio/actions/runs/39376494089)은 **Success**입니다. `Test (ubuntu-latest)`·`Test (windows-latest)`와 두 시험에 의존하는 `Build Windows package`가 성공했습니다. 이는 Windows GUI 시작, 실제 PHP 통합 시험과 브라우저 수집·다운로드를 포함합니다. `SEGIOArchive-Windows` 아티팩트 1개(페이지 표시 368 MB)가 게시됐으며 SHA-256은 `af8c4f7bc429b8d1e82cb2a88ff94aecedcf29e794e0819d96abe71ed5cb0233`입니다. 업로드 액션의 Node 20 강제 전환 경고와 Ubuntu 이미지 변경 안내는 비차단 메시지로 남아 있습니다. EXE 파일을 현장에서 실행하거나 실제 운영 SEGIO 계정으로 접속한 검증은 아닙니다.
