@@ -4,12 +4,14 @@ Python 3 developer tool; optional pgserver==0.1.4 and Playwright for browser che
 """
 import base64
 import json
+from html import escape
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import zipfile
+from urllib.parse import quote_plus
 
 import pgserver
 import export_approval_db as exporter
@@ -56,11 +58,14 @@ def main():
             statements.append(insert("approval_member_info", no=1, uid="target", rname="김퇴사", secret_password=secret))
             statements.append(insert("approval_member_info", no=2, uid="other", rname="다른직원"))
             statements.append(insert("approval_member_info", no=3, uid="commenter", rname="의견 작성자 이름"))
+            jpeg = (Path(__file__).parents[1] / "tests/fixtures/signature.jpg").read_bytes()
+            encoded_signature = base64.b64encode(jpeg).decode("ascii")
             for no in range(1, 18):
                 values = dict(no=no, uid="target" if no == 1 else "other", title="합성 문서 %d" % no, context="<p>본문 %d</p>" % no, fno="7", wdate="1700000000")
                 if no == 1:
+                    encoded_context = quote_plus(escape('<table><tr><td>유니코드 본문 A+B</td></tr></table><img src="/data/approval/app_images/pixel.png" onerror="window.UNSAFE=1"><img src="https://external.invalid/leak"><script>window.UNSAFE=1</script><p style="background-image:url(https://external.invalid/css);color:red">빈 문자열/NULL 보존</p>'))
                     values.update(title="한글 결재 </script><script>window.UNSAFE=1</script>",
-                                  context='<table><tr><td>유니코드 본문</td></tr></table><img src="/data/approval/app_images/pixel.png" onerror="window.UNSAFE=1"><img src="https://external.invalid/leak"><script>window.UNSAFE=1</script><p style="background-image:url(https://external.invalid/css);color:red">빈 문자열/NULL 보존</p>',
+                                  context=encoded_context,
                                   doc_id="", reference=None)
                 if no == 3:
                     values["reference"] = "someone@@이름,target@@김퇴사"
@@ -72,7 +77,7 @@ def main():
                     values["doc_recv_uid"] = "target"
                 statements.append(insert("approval_document", **values))
             statements.extend([
-                insert("approval_line", no=1, p_no=2, uid="target", rname="김퇴사 당시 이름", state="approve", order_no=1, sign='<img src="/data/approval/app_images/pixel.png">'),
+                insert("approval_line", no=1, p_no=2, uid="target", rname="김퇴사 당시 이름", state="approve", order_no=1, sign=encoded_signature),
                 insert("approval_line", no=2, p_no=7, uid="other", target_id="target", rname="대결자", state="agency"),
                 insert("approval_send_box", no=1, doc_no=5, recv_user="someone,target"),
                 insert("approval_send_box", no=2, doc_no=6, recv_uid="target2"),
@@ -120,6 +125,11 @@ def main():
             assert not (folder / "private-query").exists()
             raw = json.loads((folder / "documents/1/database.json").read_text())
             assert raw["document"]["doc_id"] == "" and raw["document"]["reference"] is None
+            assert raw["document"]["context"] == encoded_context
+            signature_raw = json.loads((folder / "documents/2/database.json").read_text())
+            assert signature_raw["related"]["approval_line"][0]["sign"] == encoded_signature
+            assert manifest["display_decoding"]["base64_signature"] == 1
+            assert manifest["display_decoding"]["urlencoded_html"] == 1
             assert "\n" not in str(raw["document"]["no"])
             assert (folder / "documents/1/attachments/1.hwp").read_bytes() == b"SYNTHETIC_ATTACHMENT_CONTENT"
             assert not (folder / "documents/4").exists() and not (folder / "documents/6").exists()
@@ -148,12 +158,19 @@ def main():
                 page.locator("#q").fill("김퇴사 당시 이름")
                 assert page.locator("article").count() == 1
                 assert page.evaluate("typeof window.UNSAFE") == "undefined"
+                page.locator("#q").fill("유니코드 본문")
+                assert page.locator("article").count() == 1
                 page.goto(viewer.url.replace("index.html", "documents/1/document.html"))
-                assert page.locator("body").inner_text().find("유니코드 본문") >= 0
+                assert "유니코드 본문 A+B" in page.locator("body").inner_text()
                 assert "의견 작성자 이름" in page.locator("body").inner_text()
                 assert page.evaluate("typeof window.UNSAFE") == "undefined"
                 assert not external
                 assert page.locator("img").first.get_attribute("src").startswith("data:image/png;base64,")
+                page.goto(viewer.url.replace("index.html", "documents/2/document.html"))
+                signatures = page.locator('img[src^="data:image/jpeg;base64,"]')
+                assert signatures.count() == 1
+                assert signatures.first.evaluate("img => img.complete && img.naturalWidth === 1")
+                assert not external
                 browser.close()
             viewer.close()
     print("PASS: exact employee scope, active/history, snapshot counts, NULL/Unicode, attachment hashes, "

@@ -1,15 +1,50 @@
 import json
+import base64
+from html import escape
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.parse import quote_plus
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import export_approval_db as exporter
 
 
 class DBExportTests(unittest.TestCase):
+    def test_encoded_body_is_decoded_then_sanitized_without_changing_literal_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = exporter.Bundle(tmp, tmp, "employee")
+            original_html = '<p>한글 A+B 100% &lt;예시&gt;</p><script>evil()</script><img src="https://external.invalid/x" onerror="evil()">'
+            stored = quote_plus(escape(original_html))
+            self.assertTrue(stored.startswith("%26lt%3Bp%26gt"))
+            rendered, plain = bundle.freeze(stored)
+            self.assertIn("한글 A+B 100% &lt;예시&gt;", rendered)
+            self.assertIn("한글 A+B 100% <예시>", plain)
+            for unsafe in ("<script", "onerror", "evil()", "https:"):
+                self.assertNotIn(unsafe, rendered)
+            ordinary, ordinary_text = bundle.freeze('<p>literal &lt;em&gt; A+B /?x=%26lt</p>')
+            self.assertIn("&lt;em&gt; A+B /?x=%26lt", ordinary)
+            self.assertEqual(bundle.display_decoding["urlencoded_html"], 1)
+            self.assertEqual(bundle.display_decoding["escaped_html"], 1)
+            literal, literal_text = bundle.freeze("&lt;script&gt;code example&lt;/script&gt;")
+            self.assertIn("&lt;script&gt;code example&lt;/script&gt;", literal)
+
+    def test_raw_jpeg_signature_becomes_an_image_and_arbitrary_base64_does_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = exporter.Bundle(tmp, tmp, "employee")
+            jpeg = (Path(__file__).parent / "fixtures/signature.jpg").read_bytes()
+            stored = base64.b64encode(jpeg).decode()
+            self.assertTrue(stored.startswith("/9j/"))
+            rendered, plain = bundle.freeze(stored, signature=True)
+            self.assertIn('src="data:image/jpeg;base64,', rendered)
+            self.assertEqual(plain, "")
+            self.assertEqual(bundle.display_decoding["base64_signature"], 1)
+            bad = base64.b64encode(b"<svg onload='evil()'></svg>").decode()
+            self.assertIsNone(exporter.signature_data_uri(bad))
+            self.assertIsNone(exporter.signature_data_uri("/9j/invalid!"))
+
     def test_attachment_traversal_symlinks_and_changed_files_are_reported(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

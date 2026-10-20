@@ -27,10 +27,12 @@ from optparse import OptionParser
 try:
     from HTMLParser import HTMLParser
     from urlparse import urlsplit, parse_qs
-    from urllib import unquote
+    from urllib import unquote, unquote_plus
+    html_unescape = HTMLParser().unescape
 except ImportError:
     from html.parser import HTMLParser
-    from urllib.parse import urlsplit, parse_qs, unquote
+    from html import unescape as html_unescape
+    from urllib.parse import urlsplit, parse_qs, unquote, unquote_plus
 
 from export_schema_from_segio_config import (
     SafeError, read_config, discover_config, connection_settings, pgpass_escape)
@@ -52,6 +54,42 @@ def text(value):
 
 def escape(value):
     return text(value).replace(u"&", u"&amp;").replace(u"<", u"&lt;").replace(u">", u"&gt;").replace(u'"', u"&quot;").replace(u"'", u"&#39;")
+
+
+def decode_display_markup(value):
+    """Unwrap confirmed document encodings; leave ordinary HTML/text intact.
+
+    Operates on a display copy only. Stop as soon as real markup is reached,
+    so literal entities, plus signs and percent escapes inside it survive.
+    """
+    value = text(value)
+    transforms = []
+    for unused in range(6):
+        leading = value.lstrip()
+        if re.match(r"^%(?:3c|26(?:lt|amp)|25(?:3c|26|25))", leading, re.I):
+            value = (unquote_plus(value.encode("utf-8")).decode("utf-8") if PY2 else
+                     unquote_plus(value, encoding="utf-8", errors="strict"))
+            transforms.append("urlencoded_html")
+        elif re.match(r"^&(?:amp;)*lt;\s*(?:!doctype|html|head|body|p|div|span|table|thead|tbody|tr|td|th|br|hr|h[1-6]|ul|ol|li|font|center|b|strong|i|em|u|pre|blockquote|img|a)\b", leading, re.I):
+            value = html_unescape(value)
+            transforms.append("escaped_html")
+        else:
+            break
+    return value, transforms
+
+
+def signature_data_uri(value):
+    encoded = re.sub(r"\s+", "", text(value))
+    if not encoded or len(encoded) > 28 * 1024 * 1024 or not re.match(r"^[A-Za-z0-9+/]+={0,2}$", encoded):
+        return None
+    try:
+        data = base64.b64decode(encoded.encode("ascii") + b"=" * ((-len(encoded)) % 4))
+    except (ValueError, TypeError, binascii.Error):
+        return None
+    mime = raster_mime(data)
+    if not mime or len(data) > 20 * 1024 * 1024:
+        return None
+    return "data:" + mime + ";base64," + base64.b64encode(data).decode("ascii")
 
 
 def tokens(value):
@@ -281,6 +319,7 @@ class Bundle:
         self.folder, self.cell, self.username = folder, os.path.realpath(cell), username
         self.files, self.issues, self.image_cache, self.attachments_by_no = {}, [], {}, {}
         self.profiles = {}
+        self.display_decoding = {"urlencoded_html": 0, "escaped_html": 0, "base64_signature": 0}
 
     def issue(self, kind, value):
         entry = {"kind": kind, "reference": text(value)}
@@ -410,15 +449,28 @@ class Bundle:
             self.issue("attachment_copy_failed_or_changed", row["no"])
             return None
 
-    def freeze(self, value):
+    def freeze(self, value, signature=False):
+        original = text(value)
+        try:
+            display, transforms = decode_display_markup(original)
+        except UnicodeDecodeError:
+            self.issue("display_markup_encoding_unresolved", "stored_value")
+            display, transforms = original, []
+        for transform in transforms:
+            self.display_decoding[transform] += 1
+        if signature:
+            image = signature_data_uri(display)
+            if image:
+                self.display_decoding["base64_signature"] += 1
+                return u'<img alt="저장된 서명" src="' + escape(image) + '">', u""
         parser = FrozenHTML(self)
         try:
-            parser.feed(text(value))
+            parser.feed(display)
             parser.close()
             return u"".join(parser.parts), u" ".join(parser.plain)
         except Exception:
             self.issue("html_parse_failed", "body")
-            return "<pre>" + escape(value) + "</pre>", text(value)
+            return "<pre>" + escape(display) + "</pre>", display
 
 
 def group_rows(rows, field):
@@ -487,7 +539,7 @@ def render_bundle(bundle, rows, counts):
             author = (text(profile["rname"]) + u" [추출 시점 회원명]" if profile.get("rname") else document.get("uid"))
         line_html, line_text = [], []
         for line in lines:
-            signature, signature_text = bundle.freeze(line.get("sign"))
+            signature, signature_text = bundle.freeze(line.get("sign"), signature=True)
             values = [line.get(k) for k in ("order_no", "division", "rname", "uid", "class", "gname", "state", "target_id")]
             line_text.extend([text(v) for v in values])
             line_html.append("<tr>" + "".join("<td>" + escape(v) + "</td>" for v in values) + "<td>" + escape(when(line.get("wdate"))) + "</td><td>" + escape(when(line.get("backupdate"))) + "</td><td>" + signature + "</td></tr>")
@@ -564,7 +616,8 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
                     "finished_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "counts": {"approval": len(items)}, "snapshot_rows": counts,
                     "coverage": [{"kind": "approval", "status": "personal_relations_only", "saved": len(items)}],
-                    "warnings": warnings, "files": bundle.files}
+                    "warnings": warnings, "files": bundle.files,
+                    "display_decoding": bundle.display_decoding}
         bundle.write("issues.json", json.dumps(bundle.issues, ensure_ascii=False, indent=2))
         payload = json.dumps({"items": items, "manifest": manifest}, ensure_ascii=False)
         payload = payload.replace(u"<", u"\\u003c").replace(u">", u"\\u003e").replace(u"&", u"\\u0026")
@@ -575,11 +628,14 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
         bundle.write("index.html", template.replace("__DATA__", payload))
         summary = ("SEGIO_DB_EXPORT_V1\nActive documents: %d\nHistorical document versions: %d\n"
                    "Attachment records: %d\nFiles copied: %d\nIssues: %d\n"
+                   "URL-decoded HTML layers: %d\nEntity-decoded HTML layers: %d\nBase64 signatures displayed: %d\n"
                    "Scope: personal relations only; mail and department-only access excluded\n"
                    "State: collected_with_warnings\nAccount deletion verified: false\n"
                    "END_SEGIO_DB_EXPORT_V1\n" %
                    (counts["approval_document"], counts["approval_document_backup"], counts["approval_attach_info"],
-                    len([p for p in bundle.files if "/attachments/" in p]), len(bundle.issues)))
+                    len([p for p in bundle.files if "/attachments/" in p]), len(bundle.issues),
+                    bundle.display_decoding["urlencoded_html"], bundle.display_decoding["escaped_html"],
+                    bundle.display_decoding["base64_signature"]))
         bundle.write("export-summary.txt", summary)
         manifest["files"] = dict(bundle.files)
         # The manifest cannot hash itself.
