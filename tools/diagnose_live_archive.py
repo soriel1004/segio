@@ -23,7 +23,10 @@ def diagnose(root, username=None):
     stage = 'initializing'
     try:
         config = read_json(os.path.join(root, 'config.json'))
-        if os.path.abspath(config['root']) != os.path.abspath(root):
+        # Windows temp paths may use RUNNER~1 while the stored fixture uses
+        # its expanded path. Compare actual paths, including case folding.
+        canonical = lambda path: os.path.normcase(os.path.realpath(path))
+        if canonical(config['root']) != canonical(root):
             raise SafeError('unsafe_job')
         checks['private_config'] = 'ok'
         folder = tempfile.mkdtemp(prefix='.diagnose-', dir=os.path.join(root, 'jobs'))
