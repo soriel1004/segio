@@ -17,7 +17,19 @@ class LocalDiagnosticTests(unittest.TestCase):
                 "id": '#!/bin/bash\nif [ "$1" = "-u" ]; then echo 0; else echo fixture_root; fi\n',
                 "su": '#!/bin/bash\nexec /bin/bash -c "$4"\n',
                 "psql": '#!/bin/bash\nif [ "$1" = "--version" ]; then echo "psql (PostgreSQL) 8.4.fixture"; exit; fi\nif [ -n "${PGHOSTADDR:-}" ]; then echo wrong-route; exit 9; fi\necho "psql: fe_sendauth: no password supplied" >&2\nexit 2\n',
-                "ps": '#!/bin/bash\nif [ "$1" = "-p" ] && [ "$3" = "-o" ] && [ "$4" = "args=" ]; then echo "custom-pg: fixture_role cell_000 [local] PRIVATE_QUERY_MUST_NOT_APPEAR"; else echo "123 1 fixture_user custom_pg_binary"; fi\n',
+                "ps": '''#!/bin/bash
+# Reproduce the legacy procps header bug seen on the production server.
+case "$*" in *"="*) echo ",ppid=,user=,comm="; echo 123; exit ;; esac
+case "$*" in
+  *"-o args"*)
+    echo "COMMAND"
+    echo "postgres: fixture_role cell_000 [local] PRIVATE_QUERY_MUST_NOT_APPEAR"
+    echo "postmaster: fixture_tcp_role cell_000 127.0.0.1(1234) PRIVATE_QUERY_MUST_NOT_APPEAR"
+    echo "unrelated: PRIVATE_QUERY_MUST_NOT_APPEAR cell_000 other"
+    ;;
+  *) echo "PID PPID USER COMMAND"; echo "123 1 fixture_user custom_pg_binary" ;;
+esac
+''',
                 "fuser": '#!/bin/bash\necho "$SEGIO_DIAGNOSTIC_TEST_PID"\n',
                 "netstat": '#!/bin/bash\necho "unix STREAM LISTENING 123/custom_pg /tmp/.s.PGSQL.fixture"\n',
             }
@@ -48,6 +60,10 @@ class LocalDiagnosticTests(unittest.TestCase):
                 self.assertIn("fe_sendauth: no password supplied", text)
                 self.assertIn("[exit_status=2]", text)
                 self.assertIn("fixture_role cell_000 [local]", text)
+                self.assertIn("123 1 fixture_user custom_pg_binary", text)
+                self.assertIn("db_user=fixture_role database=cell_000 connection=[local]", text)
+                self.assertIn("db_user=fixture_tcp_role database=cell_000 connection=127.0.0.1(1234)", text)
+                self.assertNotIn(",ppid=,user=,comm=", text)
                 for secret in ("PRIVATE_PASSWORD_MUST_NOT_APPEAR", "PRIVATE_ROUTE_MUST_NOT_APPEAR",
                                "PRIVATE_QUERY_MUST_NOT_APPEAR", "wrong-route"):
                     self.assertNotIn(secret, text)

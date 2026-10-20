@@ -26,11 +26,12 @@ segio_add_data_dir() {
 
 segio_describe_pid() {
     case "$1" in ''|*[!0-9]*) return ;; esac
-    segio_run "PROCESS_METADATA pid=$1" ps -p "$1" -o pid=,ppid=,user=,comm=
+    # Old procps versions can treat commas after '=' as header text.
+    segio_run "PROCESS_METADATA pid=$1" ps -p "$1" -o pid -o ppid -o user -o comm
     # PostgreSQL process titles expose role, DB and connection in these fields.
     # Never output full command lines or the SQL/query part of a title.
-    ps -p "$1" -o args= | awk '
-        $1 ~ /^[^[:space:]]+:$/ {print "Backend title fields:",$1,$2,$3,$4; found=1}
+    ps -ww -p "$1" -o args | awk '
+        $1 ~ /^(postgres|postmaster):$/ && NF>=4 {print "Backend title fields:",$1,$2,$3,$4; found=1}
         END {if(!found) print "Backend title unrecognized or process exited; arguments omitted"}
     '
     printf 'executable: '
@@ -52,7 +53,15 @@ segio_report() {
         segio_run PSQL_VERSION psql --version
     fi
     # Include custom binary names rather than filtering postgres/postmaster.
-    segio_run PROCESS_NAMES_ONLY ps -e -o pid=,ppid=,user=,comm=
+    segio_run PROCESS_NAMES_ONLY ps -e -o pid -o ppid -o user -o comm
+    printf '\n=== CELL_000_ACTIVE_CONNECTIONS ===\n'
+    # Fixed metadata fields only: never print a backend title's SQL tail.
+    ps -ww -e -o args | awk '
+        $1 ~ /^(postgres|postmaster):$/ && $3=="cell_000" && NF>=4 {
+            print "db_user=" $2, "database=" $3, "connection=" $4; found=1
+        }
+        END {if(!found) print "No active cell_000 backend titles found"}
+    '
 
     if [ "$(id -u)" = 0 ]; then
         segio_run POSTGRES_ACCOUNT_METADATA su - postgres -c '
