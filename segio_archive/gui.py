@@ -13,7 +13,7 @@ from .browser import BrowserUnavailable
 from .web import Collector, CollectionError, Config, DEFAULT_SERVER
 from . import __version__
 
-DB_MODE = "DB·MBOX 바로 가져오기"
+DB_MODE = "개인 SEGIO 로그인으로 자료 받기"
 WEB_MODE = "웹 화면 수집 (결재·메일)"
 SSH_MODE = "SSH로 DB·MBOX 가져오기 (관리자)"
 APP_TITLE = "그룹웨어 문서 및 메일 백업 및 검색"
@@ -45,7 +45,7 @@ class App(tk.Tk):
         self.approvals = tk.BooleanVar(value=True)
         self.mail = tk.BooleanVar(value=True)
         self.pdf = tk.BooleanVar(value=False)
-        self.method = tk.StringVar(value=SSH_MODE)
+        self.method = tk.StringVar(value=DB_MODE)
         self.http = tk.BooleanVar(value=False)
         self.manual = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="서버에 연결하기 전입니다.")
@@ -63,7 +63,7 @@ class App(tk.Tk):
         method_row.pack(fill="x", pady=(0, 8))
         ttk.Label(method_row, text="가져오기 방식", width=12).pack(side="left")
         method_box = ttk.Combobox(method_row, textvariable=self.method,
-                                 values=[SSH_MODE, DB_MODE, WEB_MODE], state="readonly", width=39)
+                                 values=[DB_MODE, SSH_MODE, WEB_MODE], state="readonly", width=39)
         self.method_box = method_box
         method_box.pack(side="left")
         method_box.bind("<<ComboboxSelected>>", self.change_method)
@@ -75,10 +75,10 @@ class App(tk.Tk):
         self.web_form = form
         form.pack(fill="x")
         for i, (label, variable, show) in enumerate([
-            ("서버 주소", self.server, ""), ("사용자 ID", self.user, ""),
-            ("암호", self.password, "•"),
+            ("서버 주소", self.server, ""), ("SEGIO 직원 ID", self.user, ""),
+            ("SEGIO 직원 암호", self.password, "•"),
         ]):
-            ttk.Label(form, text=label, width=12).grid(row=i, column=0, sticky="w", pady=6)
+            ttk.Label(form, text=label, width=18).grid(row=i, column=0, sticky="w", pady=6)
             ttk.Entry(form, textvariable=variable, show=show).grid(row=i, column=1, sticky="ew", pady=6)
         form.columnconfigure(1, weight=1)
         self.ssh_form = ttk.Frame(self.forms)
@@ -138,7 +138,7 @@ class App(tk.Tk):
         self.ssh_options.pack_forget()
         (self.ssh_options if is_ssh else self.web_options).pack(fill='x')
         self.description.config(text=('서버 관리자 SSH 계정으로 접속하고 백업할 직원의 SEGIO ID를 지정합니다.\n브라우저 로그인 없이 DB·MBOX를 직접 가져오며 끊긴 전송은 이어받습니다.' if is_ssh else
-            '직원 SEGIO ID·암호로 웹 로그인한 뒤 자료를 가져옵니다.\nDB·MBOX 방식은 서버 웹 연결 기능 설치가 필요합니다.'))
+            '개인 SEGIO 직원 ID·암호로 로그인해 본인의 자료를 내려받습니다.\n개인 DB·MBOX 다운로드는 서버 관리자의 연결 기능 설치가 필요합니다. SSH 암호를 입력하지 마세요.'))
         self.approvals.set(True)
         self.mail.set(True)
         self.pdf.set(not is_db)
