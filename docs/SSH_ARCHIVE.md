@@ -4,7 +4,7 @@ v0.4.2의 기본 방식은 **관리자 SSH 접속**입니다. Windows에서 서�
 
 ## Windows에서 실행
 
-1. **[Windows v0.4.1 직접 다운로드](https://github.com/soriel1004/segio/actions/runs/39402931283/artifacts/12255182407)**로 `SEGIOArchive-Windows`를 받습니다. GitHub 로그인 후 사용합니다. ZIP을 모두 풀고 `_internal`, `tools` 등 함께 있는 폴더를 유지한 채 `SEGIOArchive.exe`를 실행합니다. 제목의 `v0.4.2`을 확인합니다.
+1. **[Windows v0.4.2 직접 다운로드](https://github.com/soriel1004/segio/actions/runs/39511449771/artifacts/12305203438)**로 `SEGIOArchive-Windows`를 받습니다. GitHub 로그인 후 사용합니다. ZIP을 모두 풀고 `_internal`, `tools` 등 함께 있는 폴더를 유지한 채 `SEGIOArchive.exe`를 실행합니다. 제목의 `v0.4.2`을 확인합니다.
 2. 기본 방식 **SSH로 DB·MBOX 가져오기 (관리자)**를 사용합니다.
 3. 아래 항목을 입력합니다.
 
