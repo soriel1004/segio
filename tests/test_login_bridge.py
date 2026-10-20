@@ -31,12 +31,18 @@ PHP = os.environ.get('SEGIO_TEST_PHP') or shutil.which('php')
 PASSWORD = 'synthetic-password-never-save'
 ROUTER = r'''<?php
 /* Synthetic native session, not part of the deployed bridge. */
+session_name('SEGIO_TEST_SESSION');
+/* CLI -d INI parsing truncates unquoted paths at ~, including RUNNER~1. */
+session_save_path(__DIR__.'/sessions');
+if (!@session_start()) {
+    header('HTTP/1.1 500 Internal Server Error', true, 500);
+    echo 'Test fixture session storage failed'; exit;
+}
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 if ($path==='/__bridge_test_ready__') {
     header('Content-Type: application/json');
     echo json_encode(array('fixture'=>'__FIXTURE_ID__')); return;
 }
-session_name('SEGIO_TEST_SESSION'); session_start();
 if ($path==='/login' && $_SERVER['REQUEST_METHOD']==='POST') {
     if (isset($_POST['uid'], $_POST['password']) &&
         in_array($_POST['uid'], array('employee','other'), true) &&
@@ -71,9 +77,12 @@ def local_opener(jar=None):
 class LoginBridgeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.temp = tempfile.TemporaryDirectory()
+        # Exercise the INI-special ~ and spaces on every OS, not only Windows
+        # runners whose temporary path contains the short user name RUNNER~1.
+        cls.temp = tempfile.TemporaryDirectory(prefix='segio login-')
         cls.addClassCleanup(cls.temp.cleanup)
-        cls.root = Path(cls.temp.name)
+        cls.root = Path(cls.temp.name)/'RUNNER~1'/'bridge fixture'
+        cls.root.mkdir(parents=True)
         private = cls.root/'private'
         (private/'users').mkdir(parents=True)
         version = 'a'*32
@@ -99,8 +108,7 @@ class LoginBridgeTests(unittest.TestCase):
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
         cls.url = f'http://127.0.0.1:{port}'
-        cls.process = subprocess.Popen([PHP, '-n', '-d', 'session.save_path='+(cls.root/'sessions').as_posix(),
-                                        '-S', f'127.0.0.1:{port}', '-t', cls.root.as_posix(),
+        cls.process = subprocess.Popen([PHP, '-n', '-S', f'127.0.0.1:{port}', '-t', cls.root.as_posix(),
                                         (cls.root/'router.php').as_posix()],
                                        cwd=cls.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         cls.addClassCleanup(cls.stop_server)
@@ -111,6 +119,10 @@ class LoginBridgeTests(unittest.TestCase):
                     if response.status==200 and json.load(response)=={'fixture':cls.fixture_id}:
                         break
                     raise RuntimeError('Unexpected response from test PHP router')
+            except urllib.error.HTTPError as exc:
+                with exc:
+                    detail = exc.read(256)
+                raise RuntimeError(f'Test PHP readiness HTTP {exc.code}: {detail!r}') from None
             except (OSError, urllib.error.URLError):
                 if cls.process.poll() is not None:
                     raise RuntimeError('Test PHP process failed to start')

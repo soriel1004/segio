@@ -94,3 +94,7 @@ PHP 통합 시험은 전역 `urlopen`과 독립된 로컬 opener를 사용하고
 웹 보관 시험의 UTF-8 읽기를 명시하고, CI에서는 설치된 Playwright Chromium 경로를 지정해 Edge 버전·브라우저 정책 차이를 제외합니다. Actions는 Python 3.12·PHP 8.4를 사용해 Linux·Windows에서 각각 시험하고, 모두 통과한 뒤 Windows 패키지를 만듭니다. Node 24 지원 Actions로 갱신했으며 서버 도구 변경도 검증 대상입니다. `run_ci_tests.py`는 실패 시 종료 코드 1을 유지하고 시험 결과·오류를 job Summary에 기록합니다.
 
 수정 후 Linux/PHP 8.4 전체 38개 중 37개가 통과했고 Windows GUI 1개는 건너뛰었습니다. 전역 Mock·프록시 격리 시험과 실제 브라우저 다운로드도 포함합니다. 워크플로는 actionlint 1.7.7 검사를 통과했습니다. 이 로컬 결과를 실제 Windows Actions 실행 결과와 동일하다고 주장하지 않습니다.
+
+원격 실행 #9에서 Linux는 성공했지만 Windows PHP 시험이 실패하여, #10에 공개 오류 annotation 출력을 추가했습니다. 실제 Windows 오류는 `session_start(): open(C:/Users/RUNNER\\sess_..., O_RDWR) failed`였습니다. 임시 경로의 `RUNNER~1`을 PHP `-d session.save_path=...`에 따옴표 없이 전달하면 INI 파서가 `~` 앞에서 값을 잘라 버립니다. 세션 경고가 헤더보다 먼저 출력되어 JSON 대신 HTML/HTTP 200을 반환했고, 이것이 보고된 HTTPError 미발생의 실제 원인이었습니다. 전역 Mock 간섭과는 별개의 문제입니다.
+
+Linux PHP CLI에도 `-d session.save_path=C:/Users/RUNNER~1/AppData/Local/Temp/fixture/sessions`처럼 Windows 형식 값을 전달하면 구문 경고와 함께 `C:/Users/RUNNER`로 잘리는 것을 재현했습니다. `/`로 시작하는 Linux 절대 경로는 CLI의 인용 처리로 같은 문제가 드러나지 않았습니다. 시험 라우터에서 `session_save_path(__DIR__.'/sessions')`로 직접 지정하여 CLI INI 파싱을 제거했습니다. 모든 PHP 통합 시험은 이제 공백과 `RUNNER~1` 구성 요소가 있는 임시 경로에서 실행하며 시작 확인에도 실제 세션 저장 성공을 요구합니다. 세션 초기화 실패는 경고가 섞인 200 대신 명확한 500으로 표시합니다. 이 변경은 시험 라우터에만 적용하며 운영 SEGIO PHP 설정을 변경하지 않습니다.
