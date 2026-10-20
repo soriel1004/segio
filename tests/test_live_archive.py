@@ -347,9 +347,15 @@ if ($path==='/login-legacy' && $_SERVER['REQUEST_METHOD']==='POST') {
                     popups.append(popup)
                     popup.locator('[name=UID]').fill('employee')
                     popup.locator('[name=PASSWD]').fill(PASSWORD)
-                    popup.evaluate('setTimeout(()=>{document.querySelector("form").requestSubmit();setTimeout(()=>window.close(),400)},250)')
+                    popup.evaluate('setTimeout(()=>{document.querySelector("iframe").addEventListener("load",()=>window.close(),{once:true});document.querySelector("form").requestSubmit()},250)')
             client=DBCollector(config,log)
-            result=client.run('')
+            finalize=client.finalize_download
+            def capture(*args):
+                # Assert before run() closes the whole browser in its finally.
+                self.assertTrue(popups[0].is_closed())
+                finalize(*args)
+            with patch.object(client,'finalize_download',side_effect=capture):
+                result=client.run('')
             self.assertTrue(verify_archive(result)['ok'])
             self.assertEqual(len(popups),1)
             self.assertTrue(popups[0].is_closed())
