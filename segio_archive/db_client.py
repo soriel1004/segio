@@ -383,6 +383,16 @@ class DBCollector(PreparedDBCollector):
             'identity_conflict':'서버가 전달한 로그인 사용자 정보가 서로 다릅니다. 관리자에게 인증 전달 설정 확인을 요청하세요. [identity_conflict]',
             'insecure_php_configuration':'서버 PHP의 register_globals 설정 때문에 연결을 거부했습니다. 관리자에게 PHP 설정 확인을 요청하세요. [insecure_php_configuration]',
             'job_storage_failed':'서버 임시 추출 폴더에 쓸 수 없습니다. 실제 웹 실행 계정의 jobs 폴더 권한을 확인하세요. [job_storage_failed]',
+            'secure_random_unavailable':'서버에서 추출 작업 번호를 안전하게 생성하지 못했습니다. 최신 서버 tools를 다시 설치하고 PHP·Python 실행 상태를 확인하세요. [secure_random_unavailable]',
+            'csrf_required':'서버가 추출 요청의 인증 토큰을 확인하지 못했습니다. 서버 도구를 최신 버전으로 맞추고 다시 로그인하세요. [csrf_required]',
+            'read_only':'서버가 추출 요청의 HTTP 메서드를 허용하지 않았습니다. PHP의 요청 전달 설정을 확인하세요. [read_only]',
+            'unexpected_parameter':'서버가 지원하지 않는 추출 요청 항목을 받았습니다. Windows와 서버 도구의 버전을 맞추세요. [unexpected_parameter]',
+            'empty_selection':'서버에 결재 문서·메일 중 선택한 수집 항목이 전달되지 않았습니다. [empty_selection]',
+            'job_status_unavailable':'서버 추출 작업의 상태 파일을 읽지 못했습니다. [job_status_unavailable]',
+            'job_not_found':'요청한 서버 추출 작업이 없거나 로그인 계정과 일치하지 않습니다. [job_not_found]',
+            'invalid_job':'서버 추출 작업 번호가 올바르지 않습니다. [invalid_job]',
+            'export_not_ready':'서버 추출 작업이 아직 완료되지 않았습니다. [export_not_ready]',
+            'archive_unavailable':'완성된 서버 ZIP을 읽지 못했거나 크기가 달라졌습니다. [archive_unavailable]',
             'native_login_required':'SEGIO 직원 로그인을 확인하지 못했습니다. ID·암호와 서버 인증 연결을 확인하세요.',
             'mail_path_unconfigured':'서버의 직원별 메일 저장 경로가 설정되지 않았습니다.',
             'mail_path_missing_or_symlink':'해당 직원의 메일 경로가 없거나 안전한 실제 경로가 아닙니다. 서버 설정을 확인하세요.',
@@ -471,7 +481,7 @@ class DBCollector(PreparedDBCollector):
                           'ready':'이번 요청의 DB·MBOX 추출 완료'}.get(phase,'서버 추출 작업 확인 중'))
                 previous = phase
             if status.get('state')=='failed':
-                stages = {'initializing':'서버 작업 준비', 'database':'서버 결재 DB 추출',
+                stages = {'initializing':'서버 작업 준비', 'server_request':'서버 추출 요청', 'database':'서버 결재 DB 추출',
                           'mail':'서버 MBOX 원본 복사', 'packing':'서버 ZIP 압축',
                           'hashing':'서버 ZIP 검증'}
                 diagnostic = status.get('diagnostic')

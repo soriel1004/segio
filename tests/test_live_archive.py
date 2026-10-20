@@ -71,6 +71,19 @@ raise SystemExit(worker.main())
 
 
 class LiveWorkerTests(unittest.TestCase):
+    def test_random_token_helper_uses_os_entropy_without_starting_a_job(self):
+        import subprocess
+        tokens=[subprocess.check_output([sys.executable, str(ROOT/'tools/live_export_worker.py'), '--random-token'])
+                for _ in range(2)]
+        for token in tokens:
+            self.assertRegex(token, rb'\A[0-9a-f]{32}\r?\n\Z')
+        self.assertNotEqual(tokens[0], tokens[1])
+        with patch.object(worker.sys, 'argv', ['worker', '--random-token']), \
+             patch.object(worker.os, 'urandom', side_effect=OSError('entropy unavailable')), \
+             patch.object(worker, 'run_job') as run_job:
+            self.assertEqual(worker.main(), 1)
+            run_job.assert_not_called()
+
     def test_worker_records_anonymous_failure_after_cleaning_partial_exports(self):
         import errno
         with tempfile.TemporaryDirectory() as tmp:
@@ -289,6 +302,52 @@ class LiveInstallationTests(unittest.TestCase):
 @unittest.skipUnless(PHP,'PHP CLI required')
 class LiveBridgeTests(NativePHPFixture, unittest.TestCase):
     """Real native-auth fixture, detached worker and streaming client."""
+
+    def test_native_php_without_random_sources_uses_worker_entropy_and_finishes_export(self):
+        bridge=self.root/'live.php'
+        original=bridge.read_bytes()
+        try:
+            text=original.decode().replace("function_exists('random_bytes')", 'false')
+            text=text.replace("@fopen('/dev/urandom','rb')", "@fopen(__DIR__.'/missing-random','rb')")
+            text=text.replace("function_exists('openssl_random_pseudo_bytes')", 'false')
+            bridge.write_text(text,encoding='utf-8')
+            with tempfile.TemporaryDirectory() as tmp:
+                config=Config(self.url+'/', 'employee', Path(tmp),mail=True,pdf=False,
+                              allow_http=True,headless=True,timeout_ms=10000,
+                              browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+                result=DBCollector(config).run(PASSWORD)
+                self.assertTrue(verify_archive(result)['ok'])
+                self.assertEqual((result/'mail/raw/000000.mbox').read_bytes(),self.original)
+        finally:
+            bridge.write_bytes(original)
+
+    def test_start_failure_before_job_creation_records_original_safe_error_code(self):
+        bridge=self.root/'live.php'
+        launcher=self.live_root/'worker.py'
+        original_bridge,original_worker=bridge.read_bytes(),launcher.read_bytes()
+        try:
+            text=original_bridge.decode().replace("function_exists('random_bytes')", 'false')
+            text=text.replace("@fopen('/dev/urandom','rb')", "@fopen(__DIR__.'/missing-random','rb')")
+            text=text.replace("function_exists('openssl_random_pseudo_bytes')", 'false')
+            bridge.write_text(text,encoding='utf-8')
+            launcher.write_text("print('PRIVATE_WORKER_OUTPUT_MUST_NOT_BE_LOGGED')\nraise SystemExit(1)\n",encoding='utf-8')
+            with tempfile.TemporaryDirectory() as tmp:
+                config=Config(self.url+'/', 'employee', Path(tmp),mail=True,pdf=False,
+                              allow_http=True,headless=True,timeout_ms=10000,
+                              browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+                with self.assertRaisesRegex(CollectionError, 'secure_random_unavailable') as caught:
+                    DBCollector(config).run(PASSWORD)
+                self.assertNotIn('PRIVATE_WORKER_OUTPUT',str(caught.exception))
+                self.assertEqual(list(Path(tmp).iterdir()),[])
+            saved=(self.live_root/'jobs/last-failure.json').read_bytes()
+            self.assertEqual(json.loads(saved)['phase'],'secure_random_unavailable')
+            self.assertEqual(json.loads(saved)['diagnostic']['stage'],'server_request')
+            self.assertFalse([p for p in (self.live_root/'jobs').iterdir() if p.is_dir()])
+            for secret in (b'PRIVATE_WORKER_OUTPUT',b'employee',str(self.live_root).encode()):
+                self.assertNotIn(secret,saved)
+        finally:
+            bridge.write_bytes(original_bridge)
+            launcher.write_bytes(original_worker)
 
     def test_server_database_failure_survives_client_cleanup_without_secrets(self):
         launcher=self.live_root/'worker.py'

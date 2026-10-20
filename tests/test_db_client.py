@@ -29,6 +29,19 @@ def make_archive(root, user='employee', contents=None, extra=None):
 
 
 class DBClientTests(unittest.TestCase):
+    def test_start_rejections_keep_known_server_codes_without_exposing_unknown_text(self):
+        client=LiveCollector(Config('https://example.invalid/','employee',Path('unused')))
+        client.context=Mock()
+        client.csrf='b'*64
+        response=Mock(status=503,headers={'content-type':'application/json'})
+        client.context.request.post.return_value=response
+        for code in ('secure_random_unavailable','csrf_required','read_only','unexpected_parameter','empty_selection'):
+            response.body.return_value=json.dumps({'protocol':LIVE_PROTOCOL,'error':code,'secret':'SECRET_POST_BODY'}).encode()
+            with self.subTest(code=code), self.assertRaisesRegex(CollectionError, r'\['+code+r'\]') as caught:
+                client.live_call('start',post=True,approvals='1',mail='1')
+            self.assertNotIn('SECRET_POST_BODY',str(caught.exception))
+        self.assertNotIn('SECRET_PASSWORD',client.error_message('SECRET_PASSWORD'))
+
     def test_live_connection_errors_are_specific_and_do_not_expose_response_content(self):
         client=LiveCollector(Config('https://example.invalid/','employee',Path('unused')))
         client.context=Mock()

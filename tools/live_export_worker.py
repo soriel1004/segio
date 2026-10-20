@@ -28,7 +28,10 @@ FAILURE_CODES = set(('db_config_invalid', 'db_config_unreadable', 'psql_unavaila
     'mail_path_unconfigured', 'mail_path_missing_or_symlink', 'mail_changed_retry',
     'mail_unsafe_file', 'mail_unsafe_symlink', 'invalid_identity', 'invalid_metadata',
     'unsafe_job', 'cancelled', 'server_disk_full', 'server_file_too_large',
-    'server_access_denied', 'server_file_missing', 'export_failed'))
+    'server_access_denied', 'server_file_missing', 'export_failed',
+    'secure_random_unavailable', 'csrf_required', 'read_only', 'unexpected_parameter',
+    'empty_selection', 'job_storage_failed', 'export_process_unavailable',
+    'export_already_running', 'export_busy', 'mail_path_unconfigured'))
 
 
 def failure_details(exc, stage):
@@ -297,7 +300,17 @@ def main():
     parser.add_option('--config')
     parser.add_option('--job')
     parser.add_option('--detach', action='store_true')
+    parser.add_option('--random-token', action='store_true')
     options, args = parser.parse_args()
+    if options.random_token:
+        if args or options.config or options.job or options.detach:
+            parser.error('--random-token cannot be combined with job arguments')
+        try:
+            token = binascii.hexlify(os.urandom(16)).decode('ascii')
+        except (OSError, NotImplementedError):
+            return 1
+        print(token)
+        return 0
     if args or not options.config or not options.job:
         parser.error('--config and --job required')
     if options.detach:

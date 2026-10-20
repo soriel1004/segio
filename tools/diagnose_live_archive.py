@@ -94,7 +94,7 @@ def diagnose(root, username=None):
         if code in FAILURE_CODES and isinstance(details, dict):
             checks['last_failure'] = {'code': code,
                 'stage': details.get('stage') if details.get('stage') in
-                    ('initializing', 'database', 'mail', 'packing', 'hashing') else 'unknown'}
+                    ('initializing', 'server_request', 'database', 'mail', 'packing', 'hashing') else 'unknown'}
     except (IOError, OSError, ValueError, SafeError):
         pass
     print(json.dumps(checks, sort_keys=True))

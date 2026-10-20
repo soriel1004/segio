@@ -8,7 +8,56 @@ function answer($status, $value) {
     header('Content-Type: application/json; charset=UTF-8');
     echo json_encode($value); exit;
 }
-function problem($status, $code) { answer($status, array('protocol'=>'segio-live-archive/1','error'=>$code)); }
+function problem($status, $code) {
+    global $root, $action;
+    // Start can fail before a job exists. Keep an anonymous fixed error too.
+    // Do not call save_object here: a storage failure must not recurse.
+    if (isset($root,$action) && $action==='start') {
+        $temporary=@tempnam($root.'/jobs','.failure-');
+        if ($temporary!==false) {
+            $value=array('protocol'=>'segio-live-archive/1','phase'=>$code,
+                'diagnostic'=>array('stage'=>'server_request','category'=>'bridge','errno'=>null),
+                'failed_at'=>gmdate('Y-m-d\TH:i:s\Z'));
+            if (@file_put_contents($temporary,json_encode($value))!==false) {
+                @chmod($temporary,0600);
+                $target=$root.'/jobs/last-failure.json';
+                if (DIRECTORY_SEPARATOR==='\\' && is_file($target)) @unlink($target);
+                @rename($temporary,$target);
+            }
+            if (is_file($temporary)) @unlink($temporary);
+        }
+    }
+    answer($status, array('protocol'=>'segio-live-archive/1','error'=>$code));
+}
+function new_job_id($config, $root) {
+    $bytes=false;
+    if (function_exists('random_bytes')) {
+        try { $bytes=random_bytes(16); } catch (Exception $error) { $bytes=false; }
+    }
+    if (!is_string($bytes) || strlen($bytes)!==16) {
+        $random=@fopen('/dev/urandom','rb');
+        $bytes=$random?fread($random,16):false;
+        if ($random) fclose($random);
+    }
+    if ((!is_string($bytes) || strlen($bytes)!==16) && function_exists('openssl_random_pseudo_bytes')) {
+        $strong=false;
+        $bytes=openssl_random_pseudo_bytes(16,$strong);
+        if (!$strong) $bytes=false;
+    }
+    if (is_string($bytes) && strlen($bytes)===16) return bin2hex($bytes);
+    // Native SEGIO PHP may restrict /dev access and lack OpenSSL. Ask the
+    // installed worker for OS entropy, using fixed arguments and no secrets.
+    $command=escapeshellarg($config['python']).' '.escapeshellarg($config['worker']).' --random-token';
+    $pipes=array();
+    $process=@proc_open($command,array(0=>array('pipe','r'),1=>array('pipe','w'),2=>array('pipe','w')),$pipes,$root);
+    if (!is_resource($process)) problem(503,'secure_random_unavailable');
+    fclose($pipes[0]);
+    $token=stream_get_contents($pipes[1],65); fclose($pipes[1]);
+    stream_get_contents($pipes[2],4096); fclose($pipes[2]);
+    $exit=proc_close($process);
+    if ($exit!==0 || !preg_match('/\A[0-9a-f]{32}\r?\n?\z/',$token)) problem(503,'secure_random_unavailable');
+    return trim($token);
+}
 function object_file($path) {
     if (!is_file($path) || is_link($path) || filesize($path)>65536) return false;
     return json_decode(file_get_contents($path), true);
@@ -93,19 +142,7 @@ if ($action==='start') {
         }
     }
     if ($active>=4) problem(409,'export_busy');
-    $bytes=false;
-    if (function_exists('random_bytes')) $bytes=random_bytes(16);
-    else {
-        $random=@fopen('/dev/urandom','rb');
-        $bytes=$random?fread($random,16):false;
-        if ($random) fclose($random);
-    }
-    if ($bytes===false || strlen($bytes)!==16) {
-        $strong=false;
-        $bytes=function_exists('openssl_random_pseudo_bytes')?openssl_random_pseudo_bytes(16,$strong):false;
-        if (!$strong || $bytes===false) problem(503,'secure_random_unavailable');
-    }
-    $id=bin2hex($bytes); $job=$jobs.'/'.$id;
+    $id=new_job_id($config,$root); $job=$jobs.'/'.$id;
     if (!mkdir($job,0700)) problem(503,'job_storage_failed');
     save_object($job.'/request.json',array('username'=>$uid,'approvals'=>$approvals,'mail'=>$mail,'created_at'=>time()));
     save_object($job.'/status.json',array('protocol'=>'segio-live-archive/1','username'=>$uid,'job'=>$id,'state'=>'queued','phase'=>'queued'));
