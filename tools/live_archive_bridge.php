@@ -45,7 +45,15 @@ if (!is_string($uid) || !preg_match('/\A[A-Za-z0-9_.@-]{1,100}\z/',$uid) ||
 if (isset($_ENV['REMOTE_USERLEVEL']) && (string)$_ENV['REMOTE_USERLEVEL']==='0') problem(401,'native_login_required');
 $root='__PRIVATE_ROOT__';
 $config=object_file($root.'/config.json');
-if (!$config || !isset($config['csrf_secret'],$config['worker'],$config['python'])) problem(503,'service_not_configured');
+if (!$config || !isset($config['csrf_secret'],$config['worker'],$config['python'])) {
+    // No paths, settings, secret values or application records in diagnostics.
+    answer(503,array('protocol'=>'segio-live-archive/1','error'=>'service_not_configured',
+        'checks'=>array('config_exists'=>@is_file($root.'/config.json'),
+                        'config_readable'=>@is_readable($root.'/config.json'),
+                        'config_json_object'=>is_array($config),
+                        'php_path_restriction'=>(string)ini_get('open_basedir')!=='',
+                        'php_safe_mode'=>in_array(strtolower((string)ini_get('safe_mode')),array('1','on','yes','true'),true))));
+}
 $method=isset($_SERVER['REQUEST_METHOD'])?$_SERVER['REQUEST_METHOD']:(isset($_ENV['REQUEST_METHOD'])?$_ENV['REQUEST_METHOD']:'');
 $action=isset($_GET['action'])?$_GET['action']:'info';
 if (!is_string($action) || !in_array($action,array('info','start','status','download','cleanup'),true)) problem(400,'unknown_action');

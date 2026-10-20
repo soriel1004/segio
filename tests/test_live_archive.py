@@ -14,7 +14,7 @@ from segio_archive.archive import verify_archive
 from segio_archive.db_client import DBCollector
 from segio_archive.mail_import import build_local_catalog
 from segio_archive.viewer import Viewer
-from segio_archive.web import Config
+from segio_archive.web import Config, CollectionError
 from test_login_bridge import NativePHPFixture, PASSWORD, PHP
 from live_fixtures import synthetic_export
 
@@ -211,12 +211,12 @@ class LiveInstallationTests(unittest.TestCase):
             secret=b'SYNTHETIC_DB_PASSWORD_NEVER_COPY'
             config.write_bytes(secret)
             account=types.SimpleNamespace(pw_uid=1234,pw_gid=os.getgid())
-            private=root/'private'
+            private=cell/'etc/segio-live-archive'
             with patch.object(installer.os,'geteuid',return_value=0), \
                  patch.object(installer.os,'chown') as ownership, \
                  patch.object(installer.pwd,'getpwnam',return_value=account), \
                  patch.object(worker,'run_export') as export:
-                installer.install('synthetic-web',str(config),str(private))
+                installer.install('synthetic-web',str(config))
                 export.assert_not_called()
                 ownership.assert_any_call(str(private/'jobs'),1234,os.getgid())
             self.assertEqual(config.read_bytes(),secret)
@@ -248,9 +248,111 @@ class LiveBridgeTests(NativePHPFixture, unittest.TestCase):
         literal=cls.live_root.as_posix().replace("'","\\'")
         (cls.root/'live.php').write_text(php.replace('__PRIVATE_ROOT__',literal),encoding='utf-8')
         router=(cls.root/'router.php').read_text(encoding='utf-8')
+        legacy=r'''
+if ($path==='/legacy-popup') {
+    echo '<html><body><button onclick="window.open(\'/legacy-login-dynamic\',\'login\',\'width=350,height=280\')">Open login</button></body></html>';
+    return;
+}
+if ($path==='/legacy-login' || $path==='/legacy-login-dynamic') {
+    $dynamic=$path==='/legacy-login-dynamic';
+    echo '<html><body><form method="post" target="native_zero" action="'.($dynamic?'/before-submit':'/login-legacy').'" '.
+         ($dynamic?'onsubmit="this.action=\'/login-legacy\'"':'').'><input name="UID">'.
+         '<input name="PASSWD" type="password"><input type="hidden" name="native_hidden" value="preserved">'.
+         '<button type="submit">Login</button></form><iframe name="native_zero"></iframe></body></html>';
+    return;
+}
+if ($path==='/login-legacy' && $_SERVER['REQUEST_METHOD']==='POST') {
+    if (!isset($_POST['native_hidden']) || $_POST['native_hidden']!=='preserved') {
+        header('HTTP/1.1 400 Bad Request'); echo 'Missing native hidden field'; return;
+    }
+    $_POST['uid']=isset($_POST['UID'])?$_POST['UID']:'';
+    $_POST['password']=isset($_POST['PASSWD'])?$_POST['PASSWD']:'';
+    $path='/login';
+}
+'''
+        router=router.replace("$path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);",
+                              "$path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);"+legacy)
         router=router.replace("$path==='/segio/archive/bridge.php'","($path==='/segio/archive/bridge.php' || $path==='/segio/archive/live.php')")
         router=router.replace("include __DIR__.'/bridge.php';","include __DIR__.($path==='/segio/archive/live.php'?'/live.php':'/bridge.php');")
         (cls.root/'router.php').write_text(router,encoding='utf-8')
+
+    def test_automatic_uppercase_segio_fields_and_hidden_frame_login(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config=Config(self.url+'/legacy-login','employee',Path(tmp),mail=False,pdf=False,
+                          allow_http=True,headless=True,timeout_ms=5000,
+                          browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+            result=DBCollector(config).run(PASSWORD)
+            self.assertTrue(verify_archive(result)['ok'])
+
+    def test_manual_login_waits_for_native_identity_with_password_form_still_present(self):
+        for user in ('employee','other'):
+            with self.subTest(user=user),tempfile.TemporaryDirectory() as tmp:
+                output=Path(tmp)/'output'
+                config=Config(self.url+'/legacy-login-dynamic','employee',output,mail=False,pdf=False,
+                              allow_http=True,headless=True,manual_login=True,timeout_ms=5000,
+                              browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+                observed=[]
+                def log(message):
+                    if '열린 브라우저에서 로그인하세요' in message:
+                        client.page.locator('[name=UID]').fill(user)
+                        client.page.locator('[name=PASSWD]').fill(PASSWORD)
+                        client.page.evaluate('setTimeout(()=>document.querySelector("form").requestSubmit(),250)')
+                client=DBCollector(config,log)
+                finalize=client.finalize_download
+                def capture(*args):
+                    observed.append(client.page.locator('input[type=password]').count())
+                    finalize(*args)
+                with patch.object(client,'finalize_download',side_effect=capture):
+                    if user=='employee':
+                        result=client.run('')
+                        self.assertTrue(verify_archive(result)['ok'])
+                        self.assertEqual(observed,[1])
+                    else:
+                        with self.assertRaisesRegex(CollectionError,'실제 로그인 계정'):
+                            client.run('')
+                        self.assertFalse(output.exists())
+
+    def test_service_config_error_reports_safe_checks_without_setting_values(self):
+        config=self.live_root/'config.json'
+        original=config.read_bytes()
+        try:
+            config.write_bytes(b'{')
+            opener=self.logged_in()
+            import urllib.error
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                opener.open(self.url+'/segio/archive/live.php?action=info')
+            with caught.exception as response:
+                self.assertEqual(response.code,503)
+                body=response.read()
+                value=json.loads(body)
+            self.assertEqual(value['error'],'service_not_configured')
+            self.assertTrue(value['checks']['config_readable'])
+            self.assertFalse(value['checks']['config_json_object'])
+            self.assertNotIn(str(self.live_root).encode(),body)
+            self.assertNotIn(b'csrf_secret',body)
+        finally:
+            config.write_bytes(original)
+
+    def test_manual_popup_can_close_after_native_login_without_ending_download(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config=Config(self.url+'/legacy-popup','employee',Path(tmp),mail=False,pdf=False,
+                          allow_http=True,headless=True,manual_login=True,timeout_ms=5000,
+                          browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+            popups=[]
+            def log(message):
+                if '열린 브라우저에서 로그인하세요' in message:
+                    with client.page.expect_popup() as opened:
+                        client.page.locator('button').click()
+                    popup=opened.value
+                    popups.append(popup)
+                    popup.locator('[name=UID]').fill('employee')
+                    popup.locator('[name=PASSWD]').fill(PASSWORD)
+                    popup.evaluate('setTimeout(()=>{document.querySelector("form").requestSubmit();setTimeout(()=>window.close(),400)},250)')
+            client=DBCollector(config,log)
+            result=client.run('')
+            self.assertTrue(verify_archive(result)['ok'])
+            self.assertEqual(len(popups),1)
+            self.assertTrue(popups[0].is_closed())
 
     def test_live_login_db_mail_download_and_subject_search(self):
         with tempfile.TemporaryDirectory() as tmp:

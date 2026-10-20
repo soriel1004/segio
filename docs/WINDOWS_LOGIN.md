@@ -24,6 +24,16 @@ python ./install_live_archive.py --web-user segio \
 
 `Installed live employee DB/MBOX export: /segio/archive/live.php`가 나오면 설치가 끝났습니다. 설치만으로 직원 자료를 추출하지 않습니다. 업데이트할 때도 최신 `tools` 전체를 복사한 뒤 같은 명령을 실행합니다. 진행 중인 다운로드가 없는 시간에 업데이트합니다.
 
+v0.3.1부터 비공개 설정의 기본 위치는 셀의 `etc/segio-live-archive`입니다. 운영 서버에서는 이전 기본값 `/var/lib/segio-live-archive`의 Linux 읽기 권한과 JSON이 정상이어도 PHP에서 `service_not_configured`가 반환됐고, 셀의 비공개 `etc` 경로에 설치한 뒤 인증된 `capabilities` 응답이 확인됐습니다. 특정 PHP 제한 설정의 이름까지 확인한 것은 아닙니다. 이전 설치를 같은 위치로 맞추려면 다음 명령을 실행합니다. 기존 비공개 폴더는 자동 삭제하지 않습니다.
+
+```bash
+python ./install_live_archive.py --web-user segio \
+  --config /home/segio/cell000/etc/db.conf \
+  --private-root /home/segio/cell000/etc/segio-live-archive
+```
+
+설치 후 아래의 **연결 확인과 오류** 주소에서 정상 로그인 사용자의 `protocol`과 `capabilities`가 나오는지 먼저 확인합니다. 설치 메시지는 파일 설치 결과이며 네이티브 PHP에서 실제 설정을 읽을 수 있다는 검증을 대신하지 않습니다.
+
 메일 경로 기본값은 사용자가 알려준 실제 경로에 맞춘 다음 규칙입니다.
 
 ```text
@@ -36,9 +46,9 @@ koro → /home/segio/cell000/home/k/koro/mbox
 설치 결과:
 
 - 셀의 `folder/html/segio/archive/live.php`: 인증 확인, 추출 요청·진행 조회·다운로드.
-- `/var/lib/segio-live-archive/code`: root 소유 고정 추출 코드. 웹 실행 그룹은 읽기만 가능.
-- `/var/lib/segio-live-archive/config.json`: 기존 DB 설정 **경로**, 메일 경로 규칙, 요청 검증용 비밀값. DB 암호는 복사하지 않음.
-- `/var/lib/segio-live-archive/jobs`: 웹 실행 계정만 접근하는 임시 전송 작업. 직원별 사전 보관본 저장소가 아님.
+- `/home/segio/cell000/etc/segio-live-archive/code`: root 소유 고정 추출 코드. 웹 실행 그룹은 읽기만 가능.
+- `/home/segio/cell000/etc/segio-live-archive/config.json`: 기존 DB 설정 **경로**, 메일 경로 규칙, 요청 검증용 비밀값. DB 암호는 복사하지 않음.
+- `/home/segio/cell000/etc/segio-live-archive/jobs`: 웹 실행 계정만 접근하는 임시 전송 작업. 직원별 사전 보관본 저장소가 아님.
 
 작업기는 기존 웹 Linux 계정으로 실행합니다. 이 계정이 기존 `db.conf`·문서 첨부·본인 메일 폴더를 읽을 수 있어야 하며 PHP의 `proc_open`을 사용할 수 있어야 합니다. root 웹 서비스는 지원하지 않습니다. 설치기는 기존 파일 권한·DB 암호·`pg_hba.conf`·메일 설정을 변경하거나 sudo 권한을 추가하지 않습니다. PostgreSQL을 Windows에 공개할 필요도 없습니다.
 
@@ -52,6 +62,8 @@ koro → /home/segio/cell000/home/k/koro/mbox
 6. **보관함 열기**에서 검색창에 **메일 제목**을 입력합니다. 종류를 `mail`로 선택하면 메일만 볼 수 있고 보낸 사람·받는 사람·본문도 검색합니다.
 
 저장 이름은 **`segio-koro.zip`**, **`segio-koro`**입니다. 기존 이름이 있으면 `-2`, `-3`을 붙입니다. 다시 실행하면 당시 DB와 MBOX를 새로 가져옵니다. 암호·쿠키는 보관본이나 설정 파일에 저장하지 않습니다. 직접 로그인 옵션도 실제 인증 ID와 입력 ID가 다르면 거부합니다.
+
+v0.3.1은 SEGIO의 대문자 `UID`/`PASSWD`, 숨은 응답 프레임과 직접 로그인 중 바뀌는 폼 목적지를 지원합니다. 직접 로그인은 비밀번호 입력란이 사라졌는지가 아니라 서버의 네이티브 인증 ID가 입력 ID와 일치하는지로 완료를 판단합니다. 화면 전환 중 프레임이 분리되거나 로그인 팝업이 닫혀도 다른 로그인 창이 유지되면 확인을 계속합니다. 설정 응답 실패·JSON 오류·연결 시간 초과는 단계와 고정 오류 코드로 안내하며 응답 본문·암호·쿠키는 오류에 넣지 않습니다.
 
 기본 로그인 주소:
 
@@ -97,6 +109,9 @@ http://192.168.0.100/segio/archive/live.php?action=info
 | 결과 | 조치 |
 | --- | --- |
 | 미설치 / 404 / HTML 응답 | 최신 설치 명령 결과와 셀 웹 경로·PHP 지원 확인 |
+| `service_not_configured` | 비공개 `config.json` 읽기 권한·JSON 필수 항목·PHP 경로 제한 확인. 이전 `/var/lib` 설치는 위의 셀 `etc` 경로로 재설치. 권한 전체 개방이나 PHP 제한 전체 해제로 해결하지 않음 |
+| `BRIDGE_INVALID_JSON` / `BRIDGE_NOT_JSON` | 새 PHP 경로가 실제 실행되는지와 PHP 오류 확인. 응답 원문·직원 자료를 보내지 말고 오류 코드만 전달 |
+| `MANUAL_LOGIN_TIMEOUT` / `LOGIN_NOT_CONFIRMED` | 같은 서버에 로그인했는지, 확인 URL의 네이티브 사용자와 Windows 입력 ID가 같은지 확인 |
 | `native_login_required` / `identity_conflict` | 기존 SEGIO 인증 `REMOTE_USER`가 새 PHP 경로에 전달되는지 확인. HTTP 헤더나 입력 ID를 인증값으로 대체하지 않음 |
 | `export_process_unavailable` | 웹 실행 계정의 고정 코드 읽기·Python 실행 권한, PHP `proc_open` 확인 |
 | `export_failed` | 웹 실행 계정의 DB 설정·첨부 읽기 권한, 기존 `psql` 접속 확인 |

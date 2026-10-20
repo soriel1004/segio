@@ -16,7 +16,7 @@ FILES = ('live_export_worker.py', 'export_approval_db.py', 'export_schema_from_s
          'approval_db_columns.json', 'db_archive_index.html')
 
 
-def install(web_user, config, root='/var/lib/segio-live-archive', mail_template=None):
+def install(web_user, config, root=None, mail_template=None):
     if os.geteuid() != 0:
         raise SafeError('Run installer as root, not the export worker.')
     account = pwd.getpwnam(web_user)
@@ -27,7 +27,9 @@ def install(web_user, config, root='/var/lib/segio-live-archive', mail_template=
     site = os.path.join(cell, 'folder/html/segio/archive')
     if not os.path.isdir(os.path.dirname(site)) or os.path.islink(site):
         raise SafeError('Confirm the real SEGIO cell web directory.')
-    root = os.path.abspath(root)
+    # The native SEGIO PHP runtime can restrict access outside its cell.
+    # Keep private files in etc, never inside folder/html or the mail tree.
+    root = os.path.abspath(root or os.path.join(cell, 'etc', 'segio-live-archive'))
     if os.path.realpath(root) != root or root.startswith(os.path.join(cell, 'folder') + os.sep):
         raise SafeError('Private installation must be outside the webroot without symlinks.')
     # Fixed PHP single-quoted literal; CLI-configured paths cannot add code.
@@ -74,6 +76,7 @@ def install(web_user, config, root='/var/lib/segio-live-archive', mail_template=
         body = stream.read().replace(b'__PRIVATE_ROOT__', literal.encode('utf-8'))
     atomic_file(endpoint, body, account.pw_gid, 0o644)
     print('Installed live employee DB/MBOX export: /segio/archive/live.php')
+    print('Private configuration: ' + path)
     print('Mail template: ' + settings['mail_template'])
     print('No employee archive was prepared. Windows login starts a fresh job.')
     print('Worker uses the existing web OS account; it must already read DB config, data and mail.')
@@ -84,7 +87,7 @@ def main():
     parser = OptionParser(usage='%prog --web-user segio [--config /cell/etc/db.conf]')
     parser.add_option('--web-user')
     parser.add_option('--config')
-    parser.add_option('--private-root', default='/var/lib/segio-live-archive')
+    parser.add_option('--private-root', help='Private directory; default: cell/etc/segio-live-archive')
     parser.add_option('--mail-template')
     options, args = parser.parse_args()
     if args or not options.web_user:

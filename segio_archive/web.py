@@ -5,6 +5,7 @@ import hashlib
 import html
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from email import policy
 from email.parser import BytesParser
@@ -157,12 +158,81 @@ class Collector:
             return route.abort()
         if not self.authenticated and req.method not in {"GET", "HEAD", "POST"}:
             return route.abort()
-        if not self.authenticated and req.method == "POST" and canonical(req.url) not in self.login_actions:
-            return route.abort()
+        if not self.authenticated and req.method == "POST":
+            if canonical(req.url) not in self.login_actions:
+                # SEGIO can create a popup or change the form's HTTPS action
+                # in its submit handler. Trust only password forms actually
+                # present in this context, still within the configured host.
+                self.register_login_forms()
+            if canonical(req.url) not in self.login_actions:
+                return route.abort()
+            self._last_login_base = urljoin(req.url, '/')
         return route.continue_()
 
+    @staticmethod
+    def frame_transition(exc):
+        from playwright.sync_api import Error
+        return isinstance(exc, Error) and any(value in str(exc).lower() for value in (
+            'frame was detached', 'execution context was destroyed',
+            'cannot find context with specified id', 'most likely because of a navigation'))
+
+    def login_pages(self):
+        pages = list(self.context.pages) if self.context else [self.page]
+        return [page for page in pages if not page.is_closed()]
+
+    def register_login_forms(self):
+        for page in self.login_pages():
+            for frame in page.frames:
+                try:
+                    actions = frame.locator('input[type="password"]').evaluate_all(
+                        'els=>els.map(e=>e.form?.action).filter(Boolean)')
+                except Exception as exc:
+                    if self.frame_transition(exc) or page.is_closed():
+                        continue
+                    raise
+                for action in actions:
+                    if urlsplit(action).scheme == 'https' and urlsplit(action).hostname == urlsplit(self.base).hostname:
+                        self.scope.add(origin(action))
+                    if self.in_scope(action):
+                        self.login_actions.add(canonical(action))
+
     def login_present(self, page) -> bool:
-        return any(f.locator('input[type="password"]').count() for f in page.frames)
+        moving = False
+        for frame in page.frames:
+            try:
+                if frame.locator('input[type="password"]').count():
+                    return True
+            except Exception as exc:
+                if not self.frame_transition(exc):
+                    raise
+                moving = True
+        return moving
+
+    def manual_login_complete(self):
+        return not self.login_present(self.page)
+
+    def confirm_login(self):
+        pass
+
+    def wait_for_manual_login(self):
+        self.log('열린 브라우저에서 로그인하세요. 최대 3분 동안 로그인 완료를 확인합니다.')
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            self.checkpoint()
+            pages = self.login_pages()
+            if not pages:
+                raise CollectionError('로그인 브라우저가 닫혔습니다. 창을 유지한 채 다시 실행하세요. [BROWSER_CLOSED]')
+            if self.page.is_closed():
+                self.page = pages[0]
+            self.register_login_forms()
+            if self.manual_login_complete():
+                return
+            try:
+                self.page.wait_for_timeout(500)
+            except Exception:
+                if not self.page.is_closed():
+                    raise
+        raise CollectionError('서버에서 직접 로그인을 확인하지 못했습니다. 같은 서버 주소로 로그인했는지와 서버 연결 기능의 인증 전달을 확인하세요. [MANUAL_LOGIN_TIMEOUT]')
 
     def navigate(self, url, page=None):
         self.checkpoint()
@@ -185,17 +255,12 @@ class Collector:
 
     def login(self, password: str, *, probe=True):
         self.navigate(self.config.server)
-        login_frame = next((f for f in self.page.frames if f.locator('input[type="password"]').count()), None)
-        if login_frame:
-            for action in login_frame.locator('input[type="password"]').evaluate_all("els=>els.map(e=>e.form?.action).filter(Boolean)"):
-                if urlsplit(action).scheme == "https" and urlsplit(action).hostname == urlsplit(self.base).hostname:
-                    self.scope.add(origin(action))
-                if self.in_scope(action):
-                    self.login_actions.add(canonical(action))
+        self.register_login_forms()
         if not self.config.manual_login:
+            login_frame = next((f for f in self.page.frames if f.locator('input[type="password"]').count()), None)
             if login_frame is None:
                 raise CollectionError("로그인 폼을 찾지 못했습니다. 로그인 페이지 주소나 브라우저 직접 로그인을 사용하세요.")
-            uid = login_frame.locator('input[name="uid"], input[name="userid"], input[name="username"], input[name="id"]')
+            uid = login_frame.locator('input[name="uid" i], input[name="userid" i], input[name="username" i], input[name="id" i]')
             if not uid.count():
                 raise CollectionError("사용자 ID 입력란을 찾지 못했습니다. 브라우저 직접 로그인을 사용하세요.")
             uid.first.fill(self.config.username)
@@ -219,16 +284,7 @@ class Collector:
             except Exception:
                 pass
         else:
-            self.log("열린 브라우저에서 로그인하세요. 최대 3분 동안 로그인 완료를 확인합니다.")
-            for _ in range(180):
-                self.checkpoint()
-                if self.page.is_closed():
-                    raise CollectionError("로그인 브라우저가 닫혔습니다.")
-                if not self.login_present(self.page):
-                    break
-                self.page.wait_for_timeout(1000)
-            else:
-                raise CollectionError("직접 로그인 대기 시간이 지났습니다.")
+            self.wait_for_manual_login()
         # Probe an authenticated page. A successful POST or a session cookie alone is insufficient.
         if probe:
             probe_path = APPROVAL_BASE + "index.php" if self.config.approvals else "/_mail/inbox.mbox/"
@@ -239,9 +295,10 @@ class Collector:
             mail_info = self.page.evaluate("() => Array.isArray(window.Mail_info) && window.Mail_info.length>1")
             if not markers.count() and not mail_info:
                 raise CollectionError("로그인 후 결재·메일 화면을 확인하지 못했습니다. 서버 화면에 맞춘 연결 조정이 필요합니다.")
+        self.confirm_login()
         self.authenticated = True
         # Server-generated login may upgrade HTTP to HTTPS.
-        u = urlsplit(self.page.url)
+        u = urlsplit(getattr(self, '_verified_login_base', None) or self.page.url)
         self.base = urlunsplit((u.scheme, u.netloc, "/", "", ""))
         if u.scheme == "https":
             self.scope = {s for s in self.scope if s[0] == "https"}

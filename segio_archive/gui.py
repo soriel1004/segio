@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 from .archive import verify_archive, STATES
 from .browser import BrowserUnavailable
 from .web import Collector, CollectionError, Config, DEFAULT_SERVER
+from . import __version__
 
 DB_MODE = "DB·MBOX 바로 가져오기"
 WEB_MODE = "웹 화면 수집 (결재·메일)"
@@ -19,7 +20,7 @@ WEB_MODE = "웹 화면 수집 (결재·메일)"
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("SEGIO 퇴사자 문서·메일 보관")
+        self.title("SEGIO 퇴사자 문서·메일 보관 · v" + __version__)
         self.geometry("890x820")
         self.minsize(800, 700)
         self.events = queue.Queue()
