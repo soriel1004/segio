@@ -6,34 +6,38 @@
 
 ## 서버에서 구조 확인
 
-CentOS 6 서버에 설치된 `psql`을 사용합니다. 서버 운영체제·PostgreSQL·Python을 업그레이드할 필요가 없습니다. 명령은 서버 관리자가 실행하며, 이 작업을 위해 DB를 인터넷에 공개하지 않습니다.
+사용자가 PostgreSQL 기본 설치 후 별도 DB 암호를 설정하지 않았다고 확인했습니다. 아래는 **CentOS 6 서버에 root로 로그인한 상태에서 운영체제의 `postgres` 계정으로 전환하여 기본 로컬 인증을 사용하는 절차**입니다. `-h` 없이 서버 내부 Unix 소켓으로 연결하고 `-w`로 암호 입력을 요청하지 않습니다. `-w`는 인증 검사를 끄거나 빈 암호를 보내는 옵션이 아닙니다.
 
-1. GitHub ZIP 안의 `tools/inspect_approval_schema.sql`을 서버의 작업 폴더로 복사합니다. 스크립트가 있는 프로젝트 폴더에서 아래 명령을 실행합니다.
+서버에 설치된 `psql`을 사용합니다. PostgreSQL 암호 생성·변경이나 `pg_hba.conf` 수정은 하지 않습니다. 서버 운영체제·PostgreSQL·Python 업그레이드나 외부 DB 접속 설정도 필요하지 않습니다.
+
+1. GitHub ZIP 안의 `tools/inspect_approval_schema.sql`을 서버에 복사합니다. 아래는 파일을 현재 폴더의 `inspect_approval_schema.sql`이라는 이름으로 복사한 기준입니다. `su` 실행 전에 root 셸이 SQL 파일을 열어 전달하므로 `postgres` 계정에 root 폴더의 접근 권한을 줄 필요가 없습니다.
 2. 실제 DB 이름을 모르면 먼저 다음 명령으로 확인합니다.
 
 ```bash
-sudo -u postgres psql -X -d postgres -c '\l'
+su - postgres -c "psql -X -w -U postgres -d postgres -c '\l'"
 ```
 
-3. 다음 명령의 `실제DB이름`을 확인한 DB 이름으로 바꿉니다. 결과 파일은 관리자 셸에서 지정한 경로에 저장합니다. 다른 파일을 덮어쓰지 않도록 새 파일명을 선택하세요.
+3. 다음 명령의 `실제DB이름`을 확인한 SEGIO DB 이름으로 바꿉니다. `postgres`는 관리용 DB일 수 있으므로 결재 데이터가 그 안에 있다고 가정하지 않습니다. 결과 파일을 덮어쓰지 않도록 관리자 셸에서 실행하는 부분을 다음과 같이 묶습니다.
 
 ```bash
-umask 077
-sudo -u postgres psql -X -d '실제DB이름' -v ON_ERROR_STOP=1 \
-  < tools/inspect_approval_schema.sql \
-  > segio-db-structure.txt
+(
+  umask 077
+  set -C
+  su - postgres -c "psql -X -w -U postgres -d '실제DB이름' -v ON_ERROR_STOP=1" \
+    < inspect_approval_schema.sql \
+    > segio-db-structure.txt
+)
 ```
 
-서버에서 `sudo`가 없는 경우, root 관리자는 다음 방식으로 같은 SQL을 전달할 수 있습니다. 여기에서도 DB 이름을 수정해야 합니다.
+`segio-db-structure.txt`가 이미 있으면 덮어쓰기를 거부합니다. 이 경우 출력 이름을 `segio-db-structure-2.txt` 등 새 이름으로 바꿉니다. 프로젝트 폴더 구조를 그대로 복사했다면 입력 경로를 `tools/inspect_approval_schema.sql`로 바꾸세요.
+
+연결부터 간단히 확인하려면 다음 명령을 사용할 수 있습니다. 기본 로컬 인증이 정상이라면 DB 암호를 묻지 않고 접속 역할과 DB 이름이 `postgres`로 출력됩니다.
 
 ```bash
-umask 077
-su -s /bin/bash postgres -c "psql -X -d '실제DB이름' -v ON_ERROR_STOP=1" \
-  < tools/inspect_approval_schema.sql \
-  > segio-db-structure.txt
+su - postgres -c "psql -X -w -U postgres -d postgres -c 'SELECT current_user, current_database();'"
 ```
 
-이 명령은 PostgreSQL 관리 역할 `postgres`와 서버 내부 연결이 구성되어 있다는 전제입니다. 다른 DB 역할이나 접속 방식이 설정된 서버는 관리자가 기존의 정상 접속 방법을 사용하세요. 암호가 필요하면 `psql`의 터미널 입력을 사용하고 명령문·파일·채팅에 암호를 적지 마세요. 오류가 나면 접근 정책을 완화하지 말고, 암호를 제외한 오류 내용으로 원인을 확인합니다.
+이 절차는 기본 Unix 소켓 연결과 로컬 `postgres` 인증이 구성되어 있다는 전제입니다. 별도 암호를 설정하지 않았다는 사실만으로 Windows에서 TCP 접속도 암호 없이 된다고 판단하지 않습니다. `no password supplied`, `Ident authentication failed`, `Peer authentication failed` 또는 소켓 연결 오류가 나오면 로컬 인증·서비스 상태를 확인해야 합니다. 오류 문구를 확인하고 원인을 진단하며, 자동으로 암호를 설정하거나 `trust`로 인증을 완화하지 않습니다. root가 아닌 계정에서 `su`가 묻는 암호는 운영체제 계정 인증일 수 있으므로, 위 명령은 root 터미널에서 실행하세요.
 
 성공하면 `segio-db-structure.txt`의 끝에 `END_SEGIO_SCHEMA_REPORT_V1` 표시가 있습니다. 마지막 `transaction_read_only` 값은 `on`이어야 합니다. 오류가 난 부분 결과를 완성된 보고서로 간주하지 마세요.
 

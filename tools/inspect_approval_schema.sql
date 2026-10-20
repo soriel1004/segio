@@ -1,5 +1,6 @@
 -- Schema metadata only: never SELECT application rows or password values.
 -- Use the PostgreSQL server's own psql client (including older installations).
+-- No database password is embedded. Run locally as OS user postgres with psql -X -w.
 \set ON_ERROR_STOP on
 \pset pager off
 \pset format aligned

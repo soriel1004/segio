@@ -30,7 +30,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="segio-schema-check-") as tmp:
         with pgserver.get_server(Path(tmp) / "data", cleanup_mode="delete") as server:
             def run(statement):
-                return subprocess.run([str(binary), "-X", "-d", server.get_uri(),
+                return subprocess.run([str(binary), "-X", "-w", "-d", server.get_uri(),
                                        "-v", "ON_ERROR_STOP=1"], input=statement,
                                       capture_output=True, text=True, timeout=30)
             setup = run(fixture)
@@ -50,7 +50,7 @@ def main():
                                    "INSERT INTO approval_document(no) VALUES(2);")
             assert run(injected).returncode != 0
             # A machine-readable count confirms that neither path changed the rows.
-            count = subprocess.run([str(binary), "-XAt", "-d", server.get_uri(),
+            count = subprocess.run([str(binary), "-XAt", "-w", "-d", server.get_uri(),
                                     "-c", "SELECT count(*) FROM approval_document;"],
                                    capture_output=True, text=True, timeout=30)
             assert count.returncode == 0 and count.stdout.strip() == "1"
