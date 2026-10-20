@@ -1,4 +1,5 @@
 import hashlib
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -84,7 +85,7 @@ class LiveWorkerTests(unittest.TestCase):
             manifest=build_local_catalog(result,'employee')
             self.assertEqual(manifest['counts']['mail'],4)
             self.assertEqual((result/'mail/raw/000002.eml').read_bytes(),raw)
-            with sqlite3.connect(result/'catalog.sqlite3') as database:
+            with closing(sqlite3.connect(result/'catalog.sqlite3')) as database:
                 self.assertEqual(database.execute('SELECT count(*) FROM items WHERE title=?',('한글 원문',)).fetchone()[0],1)
             self.assertTrue(verify_archive(result)['ok'])
 
@@ -138,7 +139,7 @@ class LiveWorkerTests(unittest.TestCase):
                 self.assertEqual((folder/'mail/raw/000000.mbox').read_bytes(),original)
                 self.assertEqual((root/'home/e/employee/mbox/inbox.mbox').read_bytes(),original)
                 self.assertTrue(verify_archive(folder)['ok'])
-                with sqlite3.connect(folder/'catalog.sqlite3') as connection:
+                with closing(sqlite3.connect(folder/'catalog.sqlite3')) as connection:
                     self.assertEqual(connection.execute("SELECT title FROM items WHERE kind='approval'").fetchone()[0],f'현재 DB 버전 {number}')
                     titles=[r[0] for r in connection.execute("SELECT title FROM items WHERE kind='mail'")]
                     self.assertIn('회의',titles)
@@ -245,7 +246,7 @@ class LiveBridgeTests(NativePHPFixture, unittest.TestCase):
             latest=json.loads((second/'manifest.json').read_text(encoding='utf-8'))
             self.assertNotEqual(original_manifest['live_export']['job'],latest['live_export']['job'])
             self.assertEqual(second.name,'segio-employee-2')
-            with sqlite3.connect(second/'catalog.sqlite3') as database:
+            with closing(sqlite3.connect(second/'catalog.sqlite3')) as database:
                 self.assertEqual(database.execute("SELECT title FROM items WHERE kind='approval'").fetchone()[0],'요청 후 변경된 최신 DB')
             viewer=Viewer(path)
             try:

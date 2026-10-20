@@ -3,6 +3,7 @@
 Python 3 developer tool; optional pgserver==0.1.4 and Playwright for browser check.
 """
 import base64
+from contextlib import closing
 import json
 from html import escape
 import os
@@ -169,7 +170,7 @@ def main():
                 assert not (live_copy/'documents'/str(excluded)).exists()
             assert verify_archive(live_copy)['ok']
             import sqlite3
-            with sqlite3.connect(live_copy/'catalog.sqlite3') as connection:
+            with closing(sqlite3.connect(live_copy/'catalog.sqlite3')) as connection:
                 assert connection.execute('SELECT count(*) FROM items').fetchone()[0] == 11
                 assert connection.execute('SELECT count(*) FROM document_records').fetchone()[0] == 11
             assert all(p.read_bytes() == data for p, data in originals.items())
