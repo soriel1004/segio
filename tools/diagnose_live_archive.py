@@ -15,6 +15,25 @@ from live_export_worker import read_json, failure_details, FAILURE_CODES, invent
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def drop_to_web_account(account):
+    """Replace inherited root groups before lowering GID and UID on Python 2.6."""
+    initialize = getattr(os, 'initgroups', None)
+    if initialize is not None:
+        initialize(account.pw_name, account.pw_gid)
+    else:
+        # os.initgroups was added in Python 2.7. CentOS 6's Python 2.6 has
+        # grp and os.setgroups; never retain the invoking root user's groups.
+        import grp
+        groups = set([account.pw_gid])
+        for group in grp.getgrall():
+            if account.pw_name in group.gr_mem:
+                groups.add(group.gr_gid)
+        os.setgroups(sorted(groups))
+    # Any failure above must abort before exec or the diagnostic DB queries.
+    os.setgid(account.pw_gid)
+    os.setuid(account.pw_uid)
+
+
 def diagnose(root, username=None):
     """Never print config values, stderr, document rows, mail headers or IDs."""
     checks = {}
@@ -102,9 +121,7 @@ def main():
         command = [executable, installed, '--private-root', os.path.abspath(options.private_root)]
         if options.user:
             command.extend(['--user', options.user])
-        os.initgroups(options.web_user, account.pw_gid)
-        os.setgid(account.pw_gid)
-        os.setuid(account.pw_uid)
+        drop_to_web_account(account)
         os.chdir('/')
         os.execv(executable, command)
     old_umask = os.umask(0o077)

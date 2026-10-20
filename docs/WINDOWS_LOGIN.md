@@ -135,6 +135,12 @@ python ./diagnose_live_archive.py --web-user segio \
 
 진단은 권한을 실제 웹 OS 계정으로 낮춘 뒤 설치된 도구를 실행합니다. 임시 암호 파일을 자동 삭제하며, 기존 DB 연결로 읽기 전용 트랜잭션 안에서 14개 대상 테이블의 허용 컬럼·권한과 실제 조회 SQL의 `EXPLAIN`을 검사합니다. 직원 자료를 조회·추출하지 않고 결과는 고정 검사 항목과 오류 코드만 출력합니다. `database_connection_and_schema: ok`이면 연결·구조 검사는 통과한 것이며 실제 직원 자료 추출 완료를 뜻하지는 않습니다.
 
+CentOS 6 기본 Python 2.6에는 `os.initgroups`가 없습니다. 최신 진단 도구는 `grp`와 `os.setgroups`로 웹 계정의 그룹을 설정한 뒤 GID·UID를 낮춥니다. 이전 도구에서 `AttributeError: ... initgroups`가 발생했다면 Windows 프로그램을 다시 받을 필요 없이 아래 명령으로 즉시 진단할 수 있습니다. 운영체제의 `su`가 먼저 계정을 전환하므로 Python의 root 전환 분기를 거치지 않습니다.
+
+```bash
+su -s /bin/sh segio -c '/usr/bin/python /home/segio/cell000/etc/segio-live-archive/code/diagnose_live_archive.py --private-root /home/segio/cell000/etc/segio-live-archive'
+```
+
 개인 메일 경로·읽기 권한까지 확인하려면 직원 ID를 직접 입력합니다. 암호는 입력하지 않습니다. 파일 내용은 출력·보관하지 않습니다.
 
 ```bash
