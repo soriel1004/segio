@@ -154,7 +154,10 @@ def build_local_catalog(root: Path, user: str, checkpoint=lambda: None):
         with path.open('rb') as stream:
             prefix = stream.read(8192)
         is_mbox = not prefix or prefix.startswith(b'From ')
-        is_eml = not is_mbox and bool(re.match(rb'(?i)(return-path|received|date|from|to|subject|message-id|mime-version):', prefix))
+        # Postfix/Maildir messages can start with Delivered-To or an X-* field.
+        # Require a header-shaped first line and a mail header in the prefix.
+        is_eml = (not is_mbox and bool(re.match(rb'[A-Za-z][A-Za-z0-9-]*:', prefix)) and
+                  bool(re.search(rb'(?im)^(return-path|delivered-to|received|date|from|to|subject|message-id|mime-version|content-type):', prefix)))
         if not is_mbox and not is_eml:
             source['format'] = 'unrecognized'
             issues.append({'kind': 'unrecognized_mail_file', 'source': name})

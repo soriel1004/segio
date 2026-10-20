@@ -71,7 +71,8 @@ class LiveWorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
             create_fixture(root)
-            raw=b'Subject: '+ '한글 원문'.encode('cp949')+b'\r\nFrom: synthetic@example.test\r\n\r\nbody\r\n'
+            raw=(b'Delivered-To: employee@example.test\r\nX-Original-To: employee@example.test\r\nSubject: '+
+                 '한글 원문'.encode('cp949')+b'\r\nFrom: synthetic@example.test\r\n\r\nbody\r\n')
             (root/'home/e/employee/mbox/plain.eml').write_bytes(raw)
             job_id='c'*32
             job=root/'jobs'/job_id

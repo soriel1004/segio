@@ -22,6 +22,14 @@ from export_schema_from_segio_config import SafeError
 PROTOCOL = 'segio-live-archive/1'
 
 
+class MailChanged(SafeError):
+    def __init__(self, stage, expected, actual):
+        SafeError.__init__(self, 'mail_changed_retry')
+        fields = ('device', 'inode', 'size', 'modified', 'changed')
+        self.diagnostic = {'stage': stage,
+                           'fields': [key for key, a, b in zip(fields, expected, actual) if a != b]}
+
+
 def write_json(path, value):
     fd, temporary = tempfile.mkstemp(prefix='.update-', dir=os.path.dirname(path))
     stream = os.fdopen(fd, 'wb')
@@ -68,11 +76,18 @@ def mail_path(template, user):
     return path
 
 
+def file_identity(info):
+    # Prefer native integer timestamp precision over floating approximations.
+    return (info.st_dev, info.st_ino, info.st_size,
+            getattr(info, 'st_mtime_ns', info.st_mtime),
+            getattr(info, 'st_ctime_ns', info.st_ctime))
+
+
 def fingerprint(path):
     info = os.lstat(path)
     if not stat.S_ISREG(info.st_mode):
         raise SafeError('mail_unsafe_file')
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime, info.st_ctime)
+    return file_identity(info)
 
 
 def inventory(root):
@@ -105,8 +120,9 @@ def copy_mail(template, user, folder, manifest, checkpoint):
         target = open(destination, 'wb')
         try:
             opened = os.fstat(source.fileno())
-            if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime, opened.st_ctime) != expected:
-                raise SafeError('mail_changed_retry')
+            actual = file_identity(opened)
+            if actual != expected:
+                raise MailChanged('open', expected, actual)
             while True:
                 checkpoint()
                 block = source.read(1024 * 1024)
@@ -120,8 +136,9 @@ def copy_mail(template, user, folder, manifest, checkpoint):
         finally:
             source.close()
             target.close()
-        if count != expected[2] or fingerprint(path) != expected:
-            raise SafeError('mail_changed_retry')
+        actual = fingerprint(path)
+        if count != expected[2] or actual != expected:
+            raise MailChanged('copy', expected, actual)
         manifest['files'][relative] = {'bytes': count, 'sha256': digest.hexdigest()}
         raw_name = name if isinstance(name, bytes) else name.encode(sys.getfilesystemencoding(), 'surrogateescape' if sys.version_info[0]>=3 else 'strict')
         try:
@@ -217,7 +234,7 @@ def run_job(config_path, job_id):
                sha256=digest.hexdigest(), counts=manifest['counts'], prepared_at=manifest['finished_at'])
     except Exception as exc:
         code = str(exc) if isinstance(exc, SafeError) and re.match(r'\A[a-z_]+\Z', str(exc)) else 'export_failed'
-        status('failed', code)
+        status('failed', code, diagnostic=exc.diagnostic if isinstance(exc, MailChanged) else None)
         archive_path = os.path.join(job, 'archive.zip')
         if os.path.isfile(archive_path):
             os.unlink(archive_path)
