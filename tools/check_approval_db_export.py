@@ -180,6 +180,45 @@ def main():
             assert secret not in diagnostic_output.getvalue()
             settings['db_config'] = str(config)
             worker.write_json(str(live_root/'config.json'), settings)
+            # The SSH helper uses the actual DB exporter without packing a
+            # server ZIP or copying original mail into its temporary folder.
+            import remote_ssh_export as ssh_helper
+            ssh_root=root/('.segio-ssh-'+'b'*32)
+            ssh_root.mkdir(mode=0o700)
+            mailbox=cell/'home/t/target/mbox'
+            mailbox.mkdir(parents=True)
+            raw=b'From synthetic@example.test\nSubject: SSH SQL fixture\n\nbody\n'
+            (mailbox/'inbox.mbox').write_bytes(raw)
+            worker.write_json(str(ssh_root/'request.json'),{
+                'protocol':ssh_helper.PROTOCOL,'user':'target','cell':str(cell),
+                'db_config':str(config),'psql':str(binary),'approvals':True,'mail':True,
+                'mail_template':str(cell/'home/{initial}/{user}/mbox')})
+            ssh_helper.prepare(str(ssh_root))
+            assert worker.read_json(str(ssh_root/'status.json'))['state']=='ready'
+            ssh_transfer=worker.read_json(str(ssh_root/'transfer.json'),64*1024*1024)
+            assert any(item['path']=='mail/raw/000000.mbox' for item in ssh_transfer['files'])
+            assert not list(ssh_root.rglob('*.zip'))
+            assert not list(ssh_root.rglob('mail/raw/*'))
+            ssh_helper.verify_sources(str(ssh_root))
+            assert (ssh_root/'verified.json').is_file()
+            assert (mailbox/'inbox.mbox').read_bytes()==raw
+            legacy_python=os.environ.get('SEGIO_TEST_PYTHON26')
+            if legacy_python:
+                # Exercise the actual old runtime, not just Python-2 parsing.
+                legacy_root=root/('.segio-ssh-'+'c'*32)
+                legacy_root.mkdir(mode=0o700)
+                request=worker.read_json(str(ssh_root/'request.json'))
+                worker.write_json(str(legacy_root/'request.json'),request)
+                command=[legacy_python,str(Path(__file__).parent/'remote_ssh_export.py'),
+                         '--root',str(legacy_root),'--action','prepare']
+                result=subprocess.run(command,capture_output=True,timeout=120)
+                assert result.returncode==0, 'Python 2.6 SSH prepare failed (raw output omitted)'
+                legacy_status=worker.read_json(str(legacy_root/'status.json'))
+                assert legacy_status['state']=='ready',legacy_status
+                result=subprocess.run(command[:-1]+['verify'],capture_output=True,timeout=60)
+                assert result.returncode==0,'Python 2.6 SSH source verification failed'
+                assert (legacy_root/'verified.json').is_file()
+                print('PASS: actual Python 2.6 SSH DB/MBOX preparation and verification')
             worker.write_json(str(job/'request.json'), {'username':'target','approvals':True,'mail':False,'created_at':1})
             worker.run_job(str(live_root/'config.json'), job_id)
             status = worker.read_json(str(job/'status.json'))

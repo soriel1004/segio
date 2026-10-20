@@ -152,15 +152,19 @@ def publish_local(staging, archive, output, username):
         folder, zipped = output/name, output/(name+'.zip')
         if folder.exists():
             continue
-        try:
-            with zipped.open('xb'):
-                pass
-        except FileExistsError:
+        if archive is not None:
+            try:
+                with zipped.open('xb'):
+                    pass
+            except FileExistsError:
+                continue
+        elif zipped.exists():
             continue
         try:
             folder.mkdir(mode=0o700)
         except FileExistsError:
-            zipped.unlink()
+            if archive is not None:
+                zipped.unlink()
             continue
         try:
             # Windows cannot replace an existing directory using MoveFileEx.
@@ -168,11 +172,13 @@ def publish_local(staging, archive, output, username):
             for child in staging.iterdir():
                 os.replace(child, folder/child.name)
             staging.rmdir()
-            os.replace(archive, zipped)
+            if archive is not None:
+                os.replace(archive, zipped)
             return folder
         except BaseException:
             shutil.rmtree(folder)
-            zipped.unlink(missing_ok=True)
+            if archive is not None:
+                zipped.unlink(missing_ok=True)
             raise
     raise CollectionError("같은 이름의 보관함이 너무 많습니다. 다른 저장 폴더를 선택하세요.")
 

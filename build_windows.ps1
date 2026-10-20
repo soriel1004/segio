@@ -11,7 +11,7 @@ Check-Exit
 $env:PLAYWRIGHT_BROWSERS_PATH = "0"
 & $python -m playwright install chromium
 Check-Exit
-& $python -m PyInstaller --noconfirm --clean --onedir --windowed --name SEGIOArchive --collect-all playwright --collect-all bs4 launch.py
+& $python -m PyInstaller --noconfirm --clean --onedir --windowed --name SEGIOArchive --collect-all playwright --collect-all bs4 --collect-all paramiko launch.py
 Check-Exit
 Copy-Item README.md dist\SEGIOArchive\README.md
 Copy-Item docs dist\SEGIOArchive\docs -Recurse

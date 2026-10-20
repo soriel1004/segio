@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import mimetypes
+import json
+import re
 import secrets
 import shutil
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, parse_qs, quote
 
 
 class Viewer:
@@ -15,6 +17,10 @@ class Viewer:
         self.folder = folder.resolve()
         if not (self.folder / "index.html").is_file():
             raise ValueError("보관함 index.html이 없습니다.")
+        try:
+            self.compact = json.loads((self.folder/'manifest.json').read_text(encoding='utf-8')).get('viewer') == 'sqlite-mail/1'
+        except (OSError, ValueError):
+            self.compact = False
         self.token = secrets.token_urlsafe(24)
         owner = self
 
@@ -35,6 +41,50 @@ class Viewer:
                 name = unquote(urlsplit(self.path).path)
                 if not name.startswith(prefix):
                     return self.send_error(404)
+                relative_name = name[len(prefix):]
+                if owner.compact and relative_name == 'api/search':
+                    from .compact_mail import search
+                    try:
+                        fields = parse_qs(urlsplit(self.path).query)
+                        data = search(owner.folder, fields.get('q',[''])[0], fields.get('kind',[''])[0],
+                                      int(fields.get('page',['0'])[0]))
+                        return self.payload(json.dumps(data,ensure_ascii=False).encode('utf-8'), 'application/json', head)
+                    except Exception:
+                        return self.send_error(400)
+                match = re.fullmatch(r'mail/(mail-[0-9]{9})(?:/(original\.eml|attachment/([0-9]{1,4})))?', relative_name)
+                if owner.compact and match:
+                    from .compact_mail import mail_record, message_html, parse_message
+                    try:
+                        identity, action, number = match.groups()
+                        if action == 'original.eml':
+                            record, source = mail_record(owner.folder, identity)
+                            size = record['end'] - record['begin']
+                            self.headers_for('message/rfc822', size, identity+'.eml')
+                            if not head:
+                                with source.open('rb') as stream:
+                                    stream.seek(record['begin'])
+                                    while size:
+                                        block = stream.read(min(size,1024*1024))
+                                        if not block:
+                                            break
+                                        self.wfile.write(block)
+                                        size -= len(block)
+                            return
+                        if number is not None:
+                            record, message = parse_message(owner.folder, identity)
+                            if message is None:
+                                return self.send_error(404)
+                            part = next((p for n,p in enumerate(message.walk()) if n==int(number)), None)
+                            if part is None or part.is_multipart() or not (part.get_filename() or part.get_content_disposition()=='attachment'):
+                                return self.send_error(404)
+                            from .mail_import import header_text
+                            return self.payload(part.get_payload(decode=True) or b'', 'application/octet-stream',
+                                                head, header_text(part.get_filename()) or 'attachment.bin')
+                        return self.payload(message_html(owner.folder,identity), 'text/html; charset=utf-8', head)
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
+                    except Exception:
+                        return self.send_error(404)
                 target = (owner.folder / name[len(prefix):]).resolve()
                 if not target.is_relative_to(owner.folder) or not target.is_file():
                     return self.send_error(404)
@@ -48,16 +98,36 @@ class Viewer:
                 relative = target.relative_to(owner.folder)
                 if ("attachments" in relative.parts or target.suffix.lower() == ".eml" or
                         relative.parts[:2] == ('mail', 'raw')):
-                    from urllib.parse import quote
                     self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(target.name))
                 else:
                     script = " script-src 'unsafe-inline';" if target == owner.folder / "index.html" else ""
-                    self.send_header("Content-Security-Policy", "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none';" + script)
+                    connect = " connect-src 'self';" if owner.compact and target == owner.folder/'index.html' else ''
+                    self.send_header("Content-Security-Policy", "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none';" + script + connect)
                 self.end_headers()
                 if not head:
                     try:
                         with target.open('rb') as incoming:
                             shutil.copyfileobj(incoming, self.wfile, length=1024*1024)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+
+            def headers_for(self, mime, length, filename=None):
+                self.send_response(200)
+                self.send_header('Content-Type',mime)
+                self.send_header('Content-Length',str(length))
+                self.send_header('Cache-Control','no-store')
+                self.send_header('Referrer-Policy','no-referrer')
+                self.send_header('X-Content-Type-Options','nosniff')
+                self.send_header('Content-Security-Policy',"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
+                if filename:
+                    self.send_header('Content-Disposition',"attachment; filename*=UTF-8''"+quote(filename))
+                self.end_headers()
+
+            def payload(self, data, mime, head, filename=None):
+                self.headers_for(mime,len(data),filename)
+                if not head:
+                    try:
+                        self.wfile.write(data)
                     except (BrokenPipeError, ConnectionResetError):
                         pass
 

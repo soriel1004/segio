@@ -30,11 +30,49 @@ def main():
     db.add_argument("--manual-login", action="store_true")
     db.add_argument("--no-mail", action="store_true")
     db.add_argument("--no-approvals", action="store_true")
+    ssh = sub.add_parser('collect-ssh',help='관리자 SSH 접속으로 직원 DB·MBOX 직접 백업')
+    ssh.add_argument('--host',default='192.168.0.100')
+    ssh.add_argument('--port',type=int,default=22)
+    ssh.add_argument('--ssh-user',default='root')
+    ssh.add_argument('--user',required=True,help='백업할 직원의 SEGIO ID')
+    ssh.add_argument('--key-file',default='')
+    ssh.add_argument('--host-key',help='관리자가 확인한 SHA256:... SSH 서버 지문')
+    ssh.add_argument('--output',type=Path,default=Path('archives'))
+    ssh.add_argument('--db-config',default='/home/segio/cell000/etc/db.conf')
+    ssh.add_argument('--cell',default='/home/segio/cell000')
+    ssh.add_argument('--mail-template',default='/home/segio/cell000/home/{initial}/{user}/mbox')
+    ssh.add_argument('--zip',action='store_true')
+    ssh.add_argument('--fresh',action='store_true',help='이전 임시 전송 대신 새 추출 시작')
+    ssh.add_argument('--no-mail',action='store_true')
+    ssh.add_argument('--no-approvals',action='store_true')
     verify = sub.add_parser("verify", help="수집 파일 SHA-256 검사")
     verify.add_argument("folder", type=Path)
     view = sub.add_parser("view", help="서버 연결 없이 로컬 보관함 열기")
     view.add_argument("folder", type=Path)
     args = parser.parse_args()
+    if args.command == 'collect-ssh':
+        from .ssh_client import SSHCollector,SSHConfig
+        from .web import CollectionError
+        import hmac
+        def confirm(host,algorithm,fingerprint):
+            if args.host_key:
+                return hmac.compare_digest(args.host_key,fingerprint)
+            print(f'SSH 서버 {host} · {algorithm} · {fingerprint}')
+            return input('관리자에게 확인한 지문과 일치하면 yes 입력: ').strip()=='yes'
+        try:
+            config=SSHConfig(host=args.host,port=args.port,ssh_user=args.ssh_user,username=args.user,
+                output=args.output,key_file=args.key_file,db_config=args.db_config,cell=args.cell,
+                mail_template=args.mail_template,approvals=not args.no_approvals,mail=not args.no_mail,
+                resume=not args.fresh,make_zip=args.zip)
+            config.validate()
+            password=getpass.getpass('서버 SSH 암호 / 개인키 암호 (저장하지 않음): ')
+            SSHCollector(config,print,confirm).run(password)
+            return 2  # Collected with comparison/account-deletion warnings.
+        except KeyboardInterrupt:
+            return 130
+        except CollectionError as exc:
+            print(str(exc),file=sys.stderr)
+            return 2
     if args.command == "view":
         import webbrowser
         import threading

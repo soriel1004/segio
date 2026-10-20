@@ -622,7 +622,7 @@ def reserve_archive_path(output, username):
         return path
 
 
-def run_export(config, username, output, cell=None, binary="/usr/bin/psql", progress=None, live_scope=False):
+def run_export(config, username, output, cell=None, binary="/usr/bin/psql", progress=None, live_scope=False, pack=True):
     notify = progress or (lambda message: None)
     if not re.match(r"^[A-Za-z0-9_.@-]{1,100}$", username):
         raise SafeError("Use an exact employee ID containing letters, digits, _, ., @ or -.")
@@ -690,6 +690,9 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
         # The manifest cannot hash itself.
         with open(os.path.join(folder, "manifest.json"), "wb") as stream:
             stream.write(json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
+        if not pack:
+            success = True
+            return folder, None
         notify("Creating ZIP archive...")
         archive_path = reserve_archive_path(output, username)
         archive = zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED, allowZip64=True)
