@@ -14,5 +14,8 @@ Check-Exit
 & $python -m PyInstaller --noconfirm --clean --onedir --windowed --name SEGIOArchive --collect-all playwright --collect-all bs4 launch.py
 Check-Exit
 Copy-Item README.md dist\SEGIOArchive\README.md
+Copy-Item docs dist\SEGIOArchive\docs -Recurse
+New-Item -ItemType Directory -Force -Path dist\SEGIOArchive\tools | Out-Null
+Get-ChildItem tools -File | Copy-Item -Destination dist\SEGIOArchive\tools
 Compress-Archive -Path dist\SEGIOArchive -DestinationPath dist\SEGIOArchive-Windows.zip -Force
 Write-Host "Built dist\SEGIOArchive-Windows.zip. Keep the complete folder beside SEGIOArchive.exe."

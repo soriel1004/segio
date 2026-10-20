@@ -183,7 +183,7 @@ class Collector:
             raise CollectionError("접근 권한이 없는 화면입니다.")
         return response
 
-    def login(self, password: str):
+    def login(self, password: str, *, probe=True):
         self.navigate(self.config.server)
         login_frame = next((f for f in self.page.frames if f.locator('input[type="password"]').count()), None)
         if login_frame:
@@ -230,21 +230,22 @@ class Collector:
             else:
                 raise CollectionError("직접 로그인 대기 시간이 지났습니다.")
         # Probe an authenticated page. A successful POST or a session cookie alone is insufficient.
-        probe_path = APPROVAL_BASE + "index.php" if self.config.approvals else "/_mail/inbox.mbox/"
-        self.navigate(urljoin(self.base, probe_path))
-        if self.login_present(self.page):
-            raise CollectionError("로그인이 확인되지 않았습니다. ID·암호와 로그인 방식을 확인하세요.")
-        markers = self.page.locator('a[href*="my_complete.php"], a[href*="view_format.php"], a[href*="/_mail/"], .appr_table, .mail_list')
-        mail_info = self.page.evaluate("() => Array.isArray(window.Mail_info) && window.Mail_info.length>1")
-        if not markers.count() and not mail_info:
-            raise CollectionError("로그인 후 결재·메일 화면을 확인하지 못했습니다. 서버 화면에 맞춘 연결 조정이 필요합니다.")
+        if probe:
+            probe_path = APPROVAL_BASE + "index.php" if self.config.approvals else "/_mail/inbox.mbox/"
+            self.navigate(urljoin(self.base, probe_path))
+            if self.login_present(self.page):
+                raise CollectionError("로그인이 확인되지 않았습니다. ID·암호와 로그인 방식을 확인하세요.")
+            markers = self.page.locator('a[href*="my_complete.php"], a[href*="view_format.php"], a[href*="/_mail/"], .appr_table, .mail_list')
+            mail_info = self.page.evaluate("() => Array.isArray(window.Mail_info) && window.Mail_info.length>1")
+            if not markers.count() and not mail_info:
+                raise CollectionError("로그인 후 결재·메일 화면을 확인하지 못했습니다. 서버 화면에 맞춘 연결 조정이 필요합니다.")
         self.authenticated = True
         # Server-generated login may upgrade HTTP to HTTPS.
         u = urlsplit(self.page.url)
         self.base = urlunsplit((u.scheme, u.netloc, "/", "", ""))
         if u.scheme == "https":
             self.scope = {s for s in self.scope if s[0] == "https"}
-        if self.config.manual_login:
+        if self.config.manual_login and probe:
             self.log("직접 로그인 계정과 입력 ID의 일치 여부를 자동 검증하지 못했습니다. 보관 대상 계정을 확인하세요.", "warning")
 
     def run(self, password: str) -> Path:

@@ -9,15 +9,19 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .archive import verify_archive, STATES
-from .web import Collector, Config, DEFAULT_SERVER
+from .browser import BrowserUnavailable
+from .web import Collector, CollectionError, Config, DEFAULT_SERVER
+
+DB_MODE = "서버 DB 보관본 받기"
+WEB_MODE = "웹 화면 수집 (결재·메일)"
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("SEGIO 퇴사자 문서·메일 보관")
-        self.geometry("850x790")
-        self.minsize(760, 720)
+        self.geometry("890x820")
+        self.minsize(800, 700)
         self.events = queue.Queue()
         self.cancel_event = threading.Event()
         self.running = False
@@ -28,8 +32,9 @@ class App(tk.Tk):
         self.password = tk.StringVar()
         self.folder = tk.StringVar(value=str(Path.home() / "Documents" / "SEGIO보관함"))
         self.approvals = tk.BooleanVar(value=True)
-        self.mail = tk.BooleanVar(value=True)
-        self.pdf = tk.BooleanVar(value=True)
+        self.mail = tk.BooleanVar(value=False)
+        self.pdf = tk.BooleanVar(value=False)
+        self.method = tk.StringVar(value=DB_MODE)
         self.http = tk.BooleanVar(value=False)
         self.manual = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="서버에 연결하기 전입니다.")
@@ -42,6 +47,15 @@ class App(tk.Tk):
         panel.pack(fill="both", expand=True)
         ttk.Label(panel, text="퇴사자의 문서와 메일을 계정 없이 열람", font=("Malgun Gothic", 18, "bold")).pack(anchor="w")
         ttk.Label(panel, text="계정이 살아 있을 때 수집하세요. 계정·문서·메일을 삭제하는 기능은 없습니다.", wraplength=770).pack(anchor="w", pady=(8, 16))
+        method_row = ttk.Frame(panel)
+        method_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(method_row, text="가져오기 방식", width=12).pack(side="left")
+        method_box = ttk.Combobox(method_row, textvariable=self.method,
+                                 values=[DB_MODE, WEB_MODE], state="readonly", width=35)
+        method_box.pack(side="left")
+        method_box.bind("<<ComboboxSelected>>", self.change_method)
+        ttk.Label(panel, text="DB 방식: 서버 관리자가 해당 직원의 보관본을 먼저 준비해야 합니다.\n직원 SEGIO ID·암호로 로그인하면 본인 보관본을 내려받습니다. 자료 기준은 서버 준비 시각입니다.",
+                  wraplength=800).pack(anchor="w", pady=(0, 8))
         form = ttk.Frame(panel)
         form.pack(fill="x")
         for i, (label, variable, show) in enumerate([
@@ -56,8 +70,11 @@ class App(tk.Tk):
         ttk.Label(panel, text="사내 PC에서는 주소의 lssgroup.co.kr 부분을 192.168.0.100 으로 바꿀 수 있습니다.").pack(anchor="w", pady=(4, 12))
         choices = ttk.Frame(panel)
         choices.pack(fill="x")
+        self.collection_choices = []
         for label, var in [("결재 문서", self.approvals), ("메일", self.mail), ("결재 PDF 생성", self.pdf)]:
-            ttk.Checkbutton(choices, text=label, variable=var).pack(side="left", padx=(0, 18))
+            widget = ttk.Checkbutton(choices, text=label, variable=var, state="disabled")
+            widget.pack(side="left", padx=(0, 18))
+            self.collection_choices.append(widget)
         ttk.Checkbutton(panel, text="암호화되지 않은 HTTP 연결 허용 (ID·암호와 문서가 전송 중 노출될 수 있음)", variable=self.http).pack(anchor="w", pady=(12, 4))
         ttk.Checkbutton(panel, text="열린 브라우저에서 직접 로그인 (자동 로그인에 실패하는 경우)", variable=self.manual).pack(anchor="w")
         ttk.Label(panel, text="암호는 파일에 저장하지 않습니다. 메일 열람으로 서버의 읽음 상태가 바뀔 수 있습니다.\n보관 폴더 자체는 암호화되지 않으므로 접근 권한을 관리하세요.", wraplength=770, foreground="#76551b").pack(anchor="w", pady=12)
@@ -76,6 +93,14 @@ class App(tk.Tk):
         self.log_text.pack(fill="both", expand=True)
         ttk.Label(panel, text="수집 후 오프라인 열람·누락 대조를 수행하세요. 계정 삭제 영향 시험과 서버 전체 백업은 별도입니다.", wraplength=770).pack(anchor="w", pady=(10, 0))
 
+    def change_method(self, event=None):
+        is_db = self.method.get() == DB_MODE
+        self.approvals.set(True)
+        self.mail.set(not is_db)
+        self.pdf.set(not is_db)
+        for widget in self.collection_choices:
+            widget.config(state="disabled" if is_db else "normal")
+
     def choose_folder(self):
         value = filedialog.askdirectory(title="백업을 저장할 상위 폴더")
         if value:
@@ -87,10 +112,11 @@ class App(tk.Tk):
         if not self.approvals.get() and not self.mail.get():
             return messagebox.showerror("선택 필요", "결재 문서 또는 메일을 선택하세요.")
         self.cancel_event = threading.Event()
+        is_db = self.method.get() == DB_MODE
         try:
             config = Config(server=self.server.get().strip(), username=self.user.get().strip(),
-                            output=Path(self.folder.get()), approvals=self.approvals.get(),
-                            mail=self.mail.get(), pdf=self.pdf.get(), allow_http=self.http.get(),
+                            output=Path(self.folder.get()), approvals=True if is_db else self.approvals.get(),
+                            mail=False if is_db else self.mail.get(), pdf=False if is_db else self.pdf.get(), allow_http=self.http.get(),
                             manual_login=self.manual.get(), cancel=self.cancel_event)
             config.validate()
             if not self.password.get() and not config.manual_login:
@@ -104,12 +130,19 @@ class App(tk.Tk):
         self.stop_button.config(state="normal")
         self.progress.start()
         self.status.set("수집 중입니다. 프로그램이 연 브라우저 창을 닫지 마세요.")
-        threading.Thread(target=self.worker, args=(config, password), daemon=True).start()
+        threading.Thread(target=self.worker, args=(config, password, is_db), daemon=True).start()
 
-    def worker(self, config, password):
+    def worker(self, config, password, is_db=False):
         try:
-            path = Collector(config, lambda s: self.events.put(("log", s))).run(password)
+            if is_db:
+                from .db_client import DBCollector
+                collector_class = DBCollector
+            else:
+                collector_class = Collector
+            path = collector_class(config, lambda s: self.events.put(("log", s))).run(password)
             self.events.put(("done", path))
+        except (CollectionError, BrowserUnavailable) as exc:
+            self.events.put(("error", str(exc)))
         except Exception as exc:
             self.events.put(("error", f"시작 실패 ({type(exc).__name__}). 저장 폴더 권한과 설치 상태를 확인하세요."))
         finally:
@@ -147,7 +180,7 @@ class App(tk.Tk):
 
     def stop(self):
         self.cancel_event.set()
-        self.status.set("현재 요청이 끝나면 중단합니다. 이미 받은 파일은 유지됩니다.")
+        self.status.set("현재 요청이 끝나면 중단합니다. 검증 전 임시 다운로드 파일은 제거합니다.")
 
     def select_archive(self):
         value = filedialog.askdirectory(title="index.html과 manifest.json이 있는 보관 폴더",

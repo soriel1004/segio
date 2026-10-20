@@ -21,6 +21,13 @@ def main():
     collect.add_argument("--headless", action="store_true")
     collect.add_argument("--manual-login", action="store_true")
     collect.add_argument("--max-pages", type=int, default=300)
+    db = sub.add_parser("collect-db", help="직원 SEGIO 로그인 후 관리자가 준비한 본인 DB 보관본 받기")
+    db.add_argument("--server", required=True)
+    db.add_argument("--user", required=True)
+    db.add_argument("--output", type=Path, default=Path("archives"))
+    db.add_argument("--allow-http", action="store_true")
+    db.add_argument("--headless", action="store_true")
+    db.add_argument("--manual-login", action="store_true")
     verify = sub.add_parser("verify", help="수집 파일 SHA-256 검사")
     verify.add_argument("folder", type=Path)
     view = sub.add_parser("view", help="서버 연결 없이 로컬 보관함 열기")
@@ -45,23 +52,33 @@ def main():
         result = verify_archive(args.folder)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["ok"] else 2
-    if args.command == "collect":
-        from .web import Collector, Config
+    if args.command in {"collect", "collect-db"}:
+        from .web import Collector, CollectionError, Config
+        from .browser import BrowserUnavailable
         try:
             config = Config(server=args.server, username=args.user, output=args.output,
-                            allow_http=args.allow_http, approvals=not args.no_approvals,
-                            mail=not args.no_mail, pdf=not args.no_pdf,
+                            allow_http=args.allow_http, approvals=not getattr(args, 'no_approvals', False),
+                            mail=False if args.command=='collect-db' else not args.no_mail,
+                            pdf=False if args.command=='collect-db' else not args.no_pdf,
                             headless=args.headless, manual_login=args.manual_login,
-                            max_pages=args.max_pages)
+                            max_pages=getattr(args, 'max_pages', 300))
             if not config.approvals and not config.mail:
                 parser.error("결재 또는 메일 중 하나를 선택하세요.")
             password = "" if args.manual_login else getpass.getpass("암호 (저장하지 않음): ")
-            path = Collector(config, print).run(password)
+            if args.command == 'collect-db':
+                from .db_client import DBCollector
+                collector_class = DBCollector
+            else:
+                collector_class = Collector
+            path = collector_class(config, print).run(password)
             password = ""
             status = json.loads((path / "manifest.json").read_text(encoding="utf-8"))["state"]
             return 0 if status == "collected" else 2
         except KeyboardInterrupt:
             return 130
+        except (CollectionError, BrowserUnavailable) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         except Exception as exc:
             print(f"시작 실패: {type(exc).__name__}", file=sys.stderr)
             return 2
