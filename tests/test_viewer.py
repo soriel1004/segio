@@ -1,4 +1,5 @@
 import http.client
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,38 @@ from segio_archive.viewer import Viewer
 
 
 class ViewerTests(unittest.TestCase):
+    def test_original_mbox_can_be_downloaded_with_length_and_attachment_headers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            (root/'index.html').write_text('test',encoding='utf-8')
+            raw=root/'mail/raw'
+            raw.mkdir(parents=True)
+            payload=b'From synthetic@example.test\nSubject: synthetic\n\n'+b'mail-body\n'*300000
+            (raw/'000000.mbox').write_bytes(payload)
+            viewer=Viewer(root)
+            try:
+                path='/'+viewer.token+'/mail/raw/000000.mbox'
+                for method in ('HEAD','GET'):
+                    connection=http.client.HTTPConnection('127.0.0.1',viewer.server.server_port)
+                    try:
+                        connection.request(method,path)
+                        response=connection.getresponse()
+                        self.assertEqual(response.status,200)
+                        self.assertEqual(response.getheader('Content-Length'),str(len(payload)))
+                        self.assertTrue(response.getheader('Content-Disposition').startswith('attachment;'))
+                        digest=hashlib.sha256()
+                        count=0
+                        while block:=response.read(32768):
+                            count+=len(block)
+                            digest.update(block)
+                        self.assertEqual(count,len(payload) if method=='GET' else 0)
+                        if method=='GET':
+                            self.assertEqual(digest.hexdigest(),hashlib.sha256(payload).hexdigest())
+                    finally:
+                        connection.close()
+            finally:
+                viewer.close()
+
     def test_local_viewer_rejects_wrong_token_traversal_and_external_host(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "archive"
