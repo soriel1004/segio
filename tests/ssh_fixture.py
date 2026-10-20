@@ -58,7 +58,7 @@ class Files(SFTPServerInterface):
             handle.readfile=handle.writefile=stream
             original=handle.read
             def read(offset,length):
-                if '/home/' in str(actual):
+                if '/home/' in actual.as_posix():
                     self.owner.reads.append((str(actual),offset,length))
                 return original(offset,length)
             handle.read=read
@@ -182,6 +182,12 @@ class SSHServer:
                 transport=paramiko.Transport(connection)
                 self.transports.append(transport)
                 transport.add_server_key(self.key)
+                # Exercise the algorithms available on CentOS 6/OpenSSH 5.3.
+                security=transport.get_security_options()
+                security.key_types=('ssh-rsa',)
+                security.kex=('diffie-hellman-group14-sha1',)
+                security.ciphers=('aes128-ctr',)
+                security.digests=('hmac-sha1',)
                 transport.set_subsystem_handler('sftp',BytePathsServer,Files,self)
                 try:
                     transport.start_server(server=Access(self))
