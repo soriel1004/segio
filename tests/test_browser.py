@@ -82,7 +82,7 @@ class BrowserTests(unittest.TestCase):
 @unittest.skipUnless(sys.platform == "win32", "Windows desktop test; Linux has no display")
 class WindowsStartupTests(unittest.TestCase):
     def test_login_window_opens_without_browser_download_or_launch(self):
-        from segio_archive.gui import App, APP_TITLE, SSH_MODE, DB_MODE, WEB_MODE
+        from segio_archive.gui import App, APP_TITLE
         with patch("segio_archive.browser.launch_browser") as launch:
             app = App()
             try:
@@ -90,8 +90,14 @@ class WindowsStartupTests(unittest.TestCase):
                 self.assertTrue(app.winfo_exists())
                 self.assertTrue(app.title().startswith(APP_TITLE))
                 self.assertEqual(app.user.get(), "")
-                self.assertEqual(app.password.get(), "")
-                self.assertEqual(app.method.get(), DB_MODE)
+                self.assertEqual(app.ssh_password.get(), "")
+                def descendants(widget):
+                    for child in widget.winfo_children():
+                        yield child
+                        yield from descendants(child)
+                self.assertFalse(any(widget.winfo_class()=='TCombobox' for widget in descendants(app)))
+                self.assertTrue(app.ssh_form.winfo_ismapped())
+                self.assertTrue(app.ssh_options.winfo_ismapped())
                 self.assertEqual(app.ssh_host.get(),'192.168.0.100')
                 self.assertEqual(app.ssh_port.get(),'22')
                 self.assertEqual(app.ssh_user.get(),'root')
@@ -100,18 +106,6 @@ class WindowsStartupTests(unittest.TestCase):
                 self.assertTrue(app.approvals.get())
                 self.assertTrue(app.mail.get())
                 self.assertFalse(app.pdf.get())
-                self.assertTrue(app.web_form.winfo_ismapped())
-                self.assertFalse(app.ssh_form.winfo_ismapped())
-                app.method.set(SSH_MODE)
-                app.change_method()
-                app.update_idletasks()
-                self.assertTrue(app.ssh_form.winfo_ismapped())
-                app.method.set(WEB_MODE)
-                app.change_method()
-                self.assertTrue(app.mail.get())
-                app.method.set(DB_MODE)
-                app.change_method()
-                self.assertTrue(app.mail.get())
                 self.assertFalse(app.running)
                 launch.assert_not_called()
             finally:
