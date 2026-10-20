@@ -4,7 +4,6 @@ import base64
 import hashlib
 import html
 import re
-import shutil
 import threading
 from dataclasses import dataclass, field
 from email import policy
@@ -15,6 +14,7 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
 from bs4 import BeautifulSoup
 
 from .archive import Archive, item_key, safe_name, STATES
+from .browser import BrowserUnavailable, launch_browser
 
 
 APPROVAL_BASE = "/segio/works/approval/"
@@ -254,10 +254,8 @@ class Collector:
         state = "partial"
         try:
             with sync_playwright() as p:
-                executable = self.config.browser_executable
-                if not executable and not Path(p.chromium.executable_path).is_file():
-                    executable = shutil.which("chromium") or shutil.which("google-chrome")
-                self.browser = p.chromium.launch(headless=self.config.headless, executable_path=executable)
+                self.browser = launch_browser(p.chromium, headless=self.config.headless,
+                                              explicit=self.config.browser_executable, log=self.log)
                 self.context = self.browser.new_context(accept_downloads=False, service_workers="block")
                 self.context.set_default_timeout(self.config.timeout_ms)
                 self.context.route("**/*", self.guard)
@@ -279,7 +277,7 @@ class Collector:
             self.log(str(exc), "warning")
         except Exception as exc:
             # Browser exceptions can contain request headers/URLs: never persist their full text.
-            message = str(exc) if isinstance(exc, CollectionError) else f"수집 오류 ({type(exc).__name__}). 서버 접근·브라우저 설치를 확인하세요."
+            message = str(exc) if isinstance(exc, (CollectionError, BrowserUnavailable)) else f"수집 오류 ({type(exc).__name__}). 서버 접근·브라우저 설치를 확인하세요."
             self.log(message, "error")
             state = "failed" if not self.seen else "partial"
         finally:

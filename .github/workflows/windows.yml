@@ -8,6 +8,8 @@ on:
       - 'requirements.txt'
       - 'build_windows.ps1'
       - 'launch.py'
+      - 'run_windows.bat'
+      - 'install_browser_windows.bat'
       - '.github/workflows/windows.yml'
 jobs:
   package:

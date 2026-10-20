@@ -103,7 +103,7 @@ class App(tk.Tk):
         self.start_button.config(state="disabled")
         self.stop_button.config(state="normal")
         self.progress.start()
-        self.status.set("수집 중입니다. 열린 Chromium 창을 닫지 마세요.")
+        self.status.set("수집 중입니다. 프로그램이 연 브라우저 창을 닫지 마세요.")
         threading.Thread(target=self.worker, args=(config, password), daemon=True).start()
 
     def worker(self, config, password):
@@ -133,7 +133,11 @@ class App(tk.Tk):
                         self.last_archive = value
                         manifest = json.loads((value / "manifest.json").read_text(encoding="utf-8"))
                         self.status.set(f"{STATES.get(manifest['state'], manifest['state'])} · {value}")
-                        messagebox.showinfo("수집 결과", "저장한 보관함에서 수집 범위·실패 내역을 확인하세요.\n이 결과만으로 계정을 삭제해도 된다는 의미는 아닙니다.")
+                        if manifest["state"] == "failed":
+                            detail = "\n".join(manifest["warnings"][1:][-3:]) or "수집 로그를 확인하세요."
+                            messagebox.showerror("수집 실패", detail)
+                        else:
+                            messagebox.showinfo("수집 결과", "저장한 보관함에서 수집 범위·실패 내역을 확인하세요.\n이 결과만으로 계정을 삭제해도 된다는 의미는 아닙니다.")
                     else:
                         self.status.set(value)
                         messagebox.showerror("수집 실패", value)
