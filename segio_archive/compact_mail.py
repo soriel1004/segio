@@ -134,11 +134,9 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
         manifest['warnings'].append(warning)
     if issue_count:
         manifest['warnings'].append(f'인식하지 못한 메일 원본 파일 {issue_count}개는 원본 그대로 보존했습니다.')
-    (root/'index.html').write_text(INDEX, encoding='utf-8')
-    for name in ('catalog.sqlite3', 'index.html'):
-        files[name] = digest_file(root/name, checkpoint)
-    (root/'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
-    return manifest
+    files['catalog.sqlite3'] = digest_file(database, checkpoint)
+    from .search_page import install_search_page
+    return install_search_page(root, manifest, checkpoint)
 
 
 def search(root: Path, query='', kind='', page=0):
@@ -202,19 +200,7 @@ def message_html(root, identity):
                 rich.append(soup.get_text('\n',strip=True))
     text = '\n'.join(plain or rich) if message is not None else '32 MiB보다 큰 메일입니다. 원본 EML을 저장해 메일 프로그램에서 열 수 있습니다.'
     return (f'<!doctype html><meta charset="utf-8"><title>{html.escape(record["title"])}</title>'
-        '<style>body{font:16px sans-serif;margin:24px;overflow-wrap:anywhere}pre{white-space:pre-wrap}</style>'
+        '<style>body{font:12px sans-serif;margin:24px;overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}</style>'
         f'<a href="../index.html">목록</a> · <a href="{identity}/original.eml">원본 EML 저장</a>'
         f'<h1>{html.escape(record["title"])}</h1><p>{html.escape(record["sender"])} → {html.escape(record["receiver"])}<br>{html.escape(record["date"])}</p>'
         f'<pre>{html.escape(text)}</pre>'+''.join(attachments)).encode('utf-8')
-
-
-INDEX = r'''<!doctype html><html lang="ko"><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
-<title>그룹웨어 문서 및 메일 백업 및 검색</title>
-<style>body{font:16px 'Malgun Gothic',sans-serif;background:#f3f5f8;color:#162234;max-width:1100px;margin:30px auto;padding:0 18px}input,select,button{font:inherit;padding:10px;margin:5px}input{width:50%}article{background:white;padding:18px;margin:12px 0;border-radius:8px}h2{font-size:18px}a{color:#075b9c}#notice{color:#76551b}</style>
-<h1>그룹웨어 문서 및 메일 백업 및 검색</h1><p>메일 제목·보낸 사람·받는 사람과 결재 내용을 검색합니다. 메일 본문과 첨부는 원본에서 열 때 읽습니다.</p>
-<p id="notice"></p><input id="q" placeholder="메일 제목 또는 검색어"><select id="kind"><option value="">전체</option><option value="mail">메일</option><option value="approval">결재</option></select>
-<p id="summary"></p><main id="results"></main><button id="prev">이전</button><span id="page"></span><button id="next">다음</button>
-<script>let page=0,timer,sequence=0;const q=document.querySelector('#q'),kind=document.querySelector('#kind');
-async function load(){let seq=++sequence;try{const r=await fetch('api/search?'+new URLSearchParams({q:q.value,kind:kind.value,page}));if(!r.ok)throw Error();const d=await r.json();if(seq!==sequence)return;document.querySelector('#summary').textContent=d.total.toLocaleString()+'건';document.querySelector('#page').textContent=String(page+1);document.querySelector('#prev').disabled=page===0;document.querySelector('#next').disabled=(page+1)*100>=d.total;const out=document.querySelector('#results');out.replaceChildren();for(const item of d.items){const a=document.createElement('article'),h=document.createElement('h2'),link=document.createElement('a'),p=document.createElement('p');link.href=item.html;link.textContent=item.title;h.append(link);p.textContent=(item.kind==='mail'?'메일':'결재')+' · '+item.folder;a.append(h,p);out.append(a)}}catch(e){document.querySelector('#notice').textContent='Windows 프로그램의 보관함 열기로 이 폴더를 열어 주세요.'}}
-q.oninput=()=>{clearTimeout(timer);timer=setTimeout(()=>{page=0;load()},250)};kind.onchange=()=>{page=0;load()};document.querySelector('#prev').onclick=()=>{page--;load()};document.querySelector('#next').onclick=()=>{page++;load()};if(location.protocol==='file:')document.querySelector('#notice').textContent='Windows 프로그램의 보관함 열기에서 이 폴더를 선택하세요. 서버 연결은 필요하지 않습니다.';else load();</script></html>'''

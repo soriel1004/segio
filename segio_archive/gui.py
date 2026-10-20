@@ -272,10 +272,18 @@ class App(tk.Tk):
         if path:
             if (path / "index.html").is_file():
                 from .viewer import Viewer
-                if self.viewer:
-                    self.viewer.close()
-                self.viewer = Viewer(path)
-                webbrowser.open(self.viewer.url)
+                try:
+                    self.status.set('보관함 목록·검색 화면을 준비합니다. 서버에서 자료를 다시 받지 않습니다.')
+                    self.update_idletasks()
+                    viewer = Viewer(path)
+                    if self.viewer:
+                        self.viewer.close()
+                    self.viewer = viewer
+                    webbrowser.open(self.viewer.url)
+                    self.status.set('보관함을 열었습니다. 결재·메일 탭과 검색 버튼을 사용하세요.')
+                except Exception as exc:
+                    self.status.set('보관함을 열지 못했습니다.')
+                    messagebox.showerror('보관함 확인', str(exc))
             else:
                 messagebox.showerror("보관함 확인", "선택한 폴더에 index.html이 없습니다.")
 

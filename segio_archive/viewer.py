@@ -21,6 +21,9 @@ class Viewer:
             self.compact = json.loads((self.folder/'manifest.json').read_text(encoding='utf-8')).get('viewer') == 'sqlite-mail/1'
         except (OSError, ValueError):
             self.compact = False
+        if self.compact:
+            from .search_page import install_search_page
+            install_search_page(self.folder)
         self.token = secrets.token_urlsafe(24)
         owner = self
 
@@ -100,7 +103,7 @@ class Viewer:
                         relative.parts[:2] == ('mail', 'raw')):
                     self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(target.name))
                 else:
-                    script = " script-src 'unsafe-inline';" if target == owner.folder / "index.html" else ""
+                    script = " script-src 'self' 'unsafe-inline';" if target == owner.folder / "index.html" else ""
                     connect = " connect-src 'self';" if owner.compact and target == owner.folder/'index.html' else ''
                     self.send_header("Content-Security-Policy", "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none';" + script + connect)
                 self.end_headers()
