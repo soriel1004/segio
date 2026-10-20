@@ -2,6 +2,8 @@
 
 Windows에서 직원의 **SEGIO ID·암호**로 로그인해 현재 결재 DB 자료와 서버 MBOX 전체를 가져오고, 계정 없이 검색·열람하는 프로그램입니다. 기본 방식은 **DB·MBOX 바로 가져오기**입니다. 결재·메일 웹페이지를 순회하지 않으며 기존 SEGIO 로그인에만 브라우저를 사용합니다.
 
+**v0.3.0 최종 검증: [Actions #17](https://github.com/soriel1004/segio/actions/runs/39381429879)에서 Linux·Windows 시험과 Windows EXE 빌드가 모두 통과했습니다.** 이 실행의 `Artifacts → SEGIOArchive-Windows`에서 실행 ZIP을 받습니다. 운영 서버의 인증 전달·실제 메일 형식과 생성 EXE의 현장 실행은 설치 후 확인이 필요합니다.
+
 **서버에는 연결 기능을 한 번 설치합니다.** 이후 Windows에서 요청할 때마다 인증된 직원의 자료를 새로 추출합니다. 직원별 보관 ZIP을 미리 만들 필요가 없습니다. 자세한 명령과 오류 확인은 **[서버 설치·Windows 실행 안내](docs/WINDOWS_LOGIN.md)**를 보세요.
 
 ## 서버에 한 번 설치

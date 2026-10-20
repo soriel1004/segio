@@ -118,3 +118,9 @@ Windows 기본 모드를 `DB·MBOX 바로 가져오기`로 변경했습니다. �
 큰 MBOX도 로컬 열람 서버에서 파일 전체를 메모리에 읽지 않고 스트리밍합니다. 원본 메일 다운로드의 HEAD/GET 길이·첨부 다운로드 헤더와 전체 바이트 해시를 별도 검사했습니다.
 
 원격 #12 Windows 시험에서는 새 테스트 세 개의 임시 폴더 정리 때 `WinError 32`가 발생했습니다. 테스트에서 `with sqlite3.connect(...)`를 사용했지만 이 문맥은 트랜잭션만 관리하고 연결을 닫지 않아 SQLite 파일이 열린 채 남았습니다. 테스트의 조회 연결을 `contextlib.closing`으로 명시적으로 닫도록 수정했습니다. 실제 로컬 색인 생성 코드는 이미 `finally: connection.close()`로 닫고 있으며 네이티브 로그인·작업기 실행·다운로드 검사는 정리 단계 전까지 정상 수행됐습니다.
+
+추가 Windows 실행 #14/#15에서 메일 파일의 `stat`/`fstat` 생성 시각 표현 차이를 변경으로 오인하는 것을 진단했습니다. 오류 응답에는 파일 경로나 내용 대신 비교 단계와 달라진 필드명만 기록합니다. Windows의 레거시 `ctime`은 POSIX의 메타데이터 변경 시각과 의미가 달라 파일 식별자·크기·수정 시각을 비교하도록 분리했고, CentOS/POSIX의 변경 시각 검사는 유지합니다. 양쪽 동작을 구분하는 회귀 검사를 추가했으며 수정 후 [Actions #16](https://github.com/soriel1004/segio/actions/runs/39380961999)에서 Linux·Windows 시험과 EXE 빌드가 통과했습니다.
+
+Python 2에서는 JSON에서 읽은 Unicode 메일 경로를 OS 파일명 바이트로 변환한 뒤 탐색합니다. CentOS 로캘과 다른 CP949 파일명이 자동 디코딩되며 실패하지 않도록 한 처리입니다. Linux에 합성 CP949 바이트 파일명을 실제 생성해 원래 이름 바이트의 hex와 파일 내용이 Windows용 보관본에 그대로 남는지 확인했고, Python 2 경로 분기도 모의 검증했습니다. 실제 Python 2.6 런타임에서 실행한 검증과는 구분합니다. Postfix의 `Delivered-To`·사용자 정의 헤더로 시작하는 개별 RFC822 메일도 검색 대상으로 인식합니다.
+
+최종 소스 커밋 `6547d1c`의 [Actions #17](https://github.com/soriel1004/segio/actions/runs/39381429879)은 **Success**입니다. Linux·Windows 시험과 두 시험에 의존하는 Windows EXE 빌드가 모두 통과했습니다. 최종 `SEGIOArchive-Windows` 아티팩트는 페이지 표시 368 MB이며 SHA-256은 `4dafa071404d36ef174f73b963565303ffc9115fec18f34817ac4fd80a0c5133`입니다. 이는 합성 자료로 실시간 직원 로그인·DB/MBOX 전송·메일 제목 검색과 Windows GUI 시작을 검증한 결과이며, 실제 운영 SEGIO 인증·자료 대조와 생성 EXE의 현장 실행을 대신하지 않습니다.
