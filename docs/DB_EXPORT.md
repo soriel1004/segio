@@ -6,6 +6,35 @@
 
 ## 서버에서 구조 확인
 
+### 기존 SEGIO 접속 설정 재사용
+
+운영 서버 보고서에서 로컬 인증이 `password`로 확인되었으므로, 먼저 SEGIO의 기존 DB 접속 설정을 재사용합니다. 프로세스 조회에서 `No active cell_000 backend titles found`가 나와도 DB가 중지되었다거나 SEGIO가 다른 DB를 사용한다고 단정할 수 없습니다. 짧은 연결은 조회 순간에 보이지 않을 수 있습니다.
+
+업로드한 배포 소스의 `cell000/etc/db.conf`에는 `DBMS`, `HOST`, `DBNAME`, `USER`, `PW`, `OPTION` 항목이 있습니다. 배포본의 값은 비어 있으므로 운영 서버 파일에도 실제 값이 저장되어 있다고 보장하지는 않습니다. 설치 스크립트의 기본 셀 경로는 `/home/segio/cell000`이며 설치 시 변경할 수 있습니다.
+
+[프로젝트 ZIP](https://github.com/soriel1004/segio/archive/refs/heads/main.zip)을 내려받아 다음 두 파일을 서버의 같은 폴더에 복사합니다.
+
+- `tools/export_schema_from_segio_config.py`
+- `tools/inspect_approval_schema.sql`
+
+두 파일이 현재 폴더에 있는 상태에서 root로 실행합니다. CentOS의 기존 Python과 `/usr/bin/psql`을 사용하며 추가 패키지를 설치하지 않습니다. 도구는 Python 2.6에서 사용할 수 있는 문법과 API로 작성했으며 실제 Python 2.6 실행 검증은 아직 하지 않았습니다.
+
+```bash
+python ./export_schema_from_segio_config.py
+```
+
+`/home`, `/etc/shttpd`, `/opt`, `/usr/local` 아래의 일반적인 셀 경로에서 `DBNAME=cell_000`이고 `USER`·`PW`가 채워진 설정이 정확히 하나인 경우 선택합니다. 조건에 맞는 파일을 찾지 못하거나 여러 개면 접속하지 않고 발견한 후보 파일의 **경로만** 표시합니다. 실제 파일 경로를 알고 있다면 명시할 수 있습니다.
+
+```bash
+python ./export_schema_from_segio_config.py --config /home/segio/cell000/etc/db.conf
+```
+
+설정 파일은 코드로 실행하지 않고 허용된 키와 단순 값만 읽습니다. 다른 DB 이름·원격 호스트·의미를 확인하지 못한 `OPTION`·알 수 없는 `DBMS`·빈 자격증명은 추측하지 않고 중단합니다. 호스트가 비어 있으면 보고서에서 확인된 `/tmp` 소켓을 사용하고, 포트는 확인된 5432만 사용합니다. 한 번의 기존 자격증명 접속이 실패하면 암호를 재시도하거나 다른 계정으로 우회하지 않습니다.
+
+암호는 권한 700의 임시 폴더 안에 권한 600의 전용 libpq 암호 파일로 전달하며, 프로세스 명령줄·화면·보고서에 출력하지 않습니다. 성공·오류 처리 후 이 임시 암호 파일을 지웁니다. 기존 `.pgpass`, `pg_hba.conf`, `pg_ident.conf`, DB 역할·암호·서비스 상태는 변경하지 않습니다. 원본 설정에 암호가 없거나 애플리케이션에서 별도로 변환하는 값이면 이 경로로 접속하지 못할 수 있으며 관리자 접속 정보를 별도로 확보해야 합니다. 설정 파일이나 암호 자체를 전달할 필요는 없습니다.
+
+성공하면 `/tmp/segio-schema-임의값/segio-db-structure.txt` 경로가 `Saved schema report:` 뒤에 표시됩니다. 이 **`segio-db-structure.txt`만** 전달합니다. 문서·첨부·메일 원본 추출은 아직 수행하지 않으며 구조 메타데이터만 수집합니다. 실패하면 화면의 오류 문구를 전달하세요.
+
 ### 운영 서버에서 추가로 확인된 인증 상태
 
 사용자 DB 이름은 `cell_000`입니다. `/tmp` 소켓으로 접속해도 `fe_sendauth: no password supplied`가 발생했고, `/var/lib/pgsql/data/pg_hba.conf`에서 다음 인증 방식이 확인되었습니다.
