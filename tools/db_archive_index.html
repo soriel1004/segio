@@ -1,0 +1,17 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>SEGIO 결재 문서 보관함</title><style>
+body{font:16px 'Malgun Gothic',sans-serif;margin:0;background:#f3f6fa;color:#182a3f}header{background:#182a3f;color:white;padding:24px}main{max-width:1100px;margin:24px auto;padding:0 20px}input,select{padding:12px;font:inherit;margin:8px 8px 8px 0}input{width:60%;max-width:600px}article{background:white;border:1px solid #d8e0e9;padding:18px;margin:14px 0;border-radius:8px}h2{font-size:20px;overflow-wrap:anywhere}a{color:#075b9c;margin-right:18px;overflow-wrap:anywhere}.note{background:#fff1cb;padding:16px;white-space:pre-line}pre{white-space:pre-wrap;overflow-wrap:anywhere}.links{display:flex;gap:12px;flex-wrap:wrap}button{padding:10px}
+</style></head><body><header><h1>SEGIO 결재 문서 보관함</h1><div id="owner"></div></header><main>
+<p class="note">DB에서 추출한 자료로 재구성한 보관본입니다. 문서·결재선·첨부를 원래 화면과 대조하세요. 계정 삭제 영향은 검증되지 않았습니다.</p>
+<input id="q" aria-label="검색" placeholder="제목·본문·기안자·결재자 검색"><select id="version" aria-label="자료 종류"><option value="">전체</option><option value="active">현재 문서</option><option value="history">과거 기록</option></select>
+<p id="count"></p><div id="list"></div><button id="more" hidden>다음 50개</button>
+<details><summary>수집 범위와 확인 사항</summary><pre id="coverage"></pre><a href="issues.json">미확보·연결 확인 내역</a><a href="export-summary.txt">수집 건수 보고서</a></details>
+</main><script type="application/json" id="data">__DATA__</script><script>
+'use strict';const data=JSON.parse(document.getElementById('data').textContent);const $=id=>document.getElementById(id);let limit=50;
+$('owner').textContent='대상 ID: '+data.manifest.user+' · 문서/이력 '+data.items.length+'개';$('coverage').textContent=data.manifest.warnings.join('\n\n')+'\n\n'+JSON.stringify(data.manifest.snapshot_rows,null,2);
+function link(label,path){const a=document.createElement('a');a.textContent=label;a.href=path.split('/').map(encodeURIComponent).join('/');a.target='_blank';a.rel='noopener noreferrer';return a}
+function render(){const q=$('q').value.toLocaleLowerCase(),v=$('version').value;const items=data.items.filter(i=>(!v||i.source===v)&&[i.title,i.search].join(' ').toLocaleLowerCase().includes(q));$('count').textContent=items.length+'개 검색됨';$('list').replaceChildren();for(const i of items.slice(0,limit)){const card=document.createElement('article'),title=document.createElement('h2'),meta=document.createElement('p'),links=document.createElement('div');title.textContent=i.title;meta.textContent=(i.source==='active'?'현재 문서':'과거 기록')+' · '+i.id;links.className='links';links.append(link('본문·결재선 보기',i.path),link('DB 기록',i.json));for(const a of i.attachments)links.append(link('첨부: '+a.name,a.path));card.append(title,meta,links);$('list').append(card)}$('more').hidden=items.length<=limit}
+for(const id of ['q','version'])$(id).addEventListener('input',()=>{limit=50;render()});$('more').onclick=()=>{limit+=50;render()};render();
+</script></body></html>
