@@ -173,6 +173,15 @@ class LiveWorkerTests(unittest.TestCase):
         self.assertNotIn('approval_favorite',sql)
         self.assertNotIn('approval_comment_info',sql)
         self.assertIn('approval_line',sql)
+        # Windows ctime is creation time, unlike the POSIX change marker.
+        # Different stat/fstat representations must not reject unchanged mail.
+        from types import SimpleNamespace
+        before=SimpleNamespace(st_dev=1,st_ino=2,st_size=30,st_mtime=4,st_mtime_ns=4000000000,st_ctime=5,st_ctime_ns=5000000000)
+        opened=SimpleNamespace(**{**vars(before),'st_ctime':5.01,'st_ctime_ns':5010000000})
+        with patch.object(worker.os,'name','nt'):
+            self.assertEqual(worker.file_identity(before),worker.file_identity(opened))
+        with patch.object(worker.os,'name','posix'):
+            self.assertNotEqual(worker.file_identity(before),worker.file_identity(opened))
 
 
 @unittest.skipIf(sys.platform=='win32', 'POSIX one-time installer')

@@ -78,9 +78,11 @@ def mail_path(template, user):
 
 def file_identity(info):
     # Prefer native integer timestamp precision over floating approximations.
+    # POSIX ctime records metadata changes. Windows legacy ctime is creation
+    # time, with different stat/fstat reporting; it is not a change marker.
     return (info.st_dev, info.st_ino, info.st_size,
             getattr(info, 'st_mtime_ns', info.st_mtime),
-            getattr(info, 'st_ctime_ns', info.st_ctime))
+            getattr(info, 'st_ctime_ns', info.st_ctime) if os.name != 'nt' else None)
 
 
 def fingerprint(path):
