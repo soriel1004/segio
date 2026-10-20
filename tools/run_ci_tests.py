@@ -15,9 +15,16 @@ def main():
     sys.path.insert(0, str(ROOT))
     suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
+    failures = result.failures + result.errors
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        for test, traceback in failures:
+            # Annotations are visible even when detailed logs and job summaries
+            # require signing in. Encode workflow-command data, not raw lines.
+            detail = f"{test.id()}\n{traceback[-5000:]}"
+            detail = detail.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+            print(f"::error::{detail}", flush=True)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
-        failures = result.failures + result.errors
         passed = result.testsRun - len(failures) - len(result.skipped)
         lines = ["## Test results", "",
                  f"Run: {result.testsRun} · Passed: {passed} · "
