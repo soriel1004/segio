@@ -13,7 +13,7 @@ from prepare_login_archive import atomic_file, private_directory
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FILES = ('live_export_worker.py', 'export_approval_db.py', 'export_schema_from_segio_config.py',
-         'approval_db_columns.json', 'db_archive_index.html')
+         'approval_db_columns.json', 'db_archive_index.html', 'diagnose_live_archive.py')
 
 
 def install(web_user, config, root=None, mail_template=None):

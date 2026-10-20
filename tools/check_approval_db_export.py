@@ -156,6 +156,30 @@ def main():
             job.mkdir(parents=True)
             settings = {'root': str(live_root), 'cell': str(cell), 'db_config': str(config), 'psql': str(binary)}
             worker.write_json(str(live_root/'config.json'), settings)
+            # Check real SQL parsing and error codes using an unprivileged DB
+            # role; the production diagnostic returns metadata/checks only.
+            from contextlib import redirect_stdout
+            from io import StringIO
+            from diagnose_live_archive import diagnose
+            diagnostic_output = StringIO()
+            with redirect_stdout(diagnostic_output):
+                assert diagnose(str(live_root)) == 0, diagnostic_output.getvalue()
+            assert json.loads(diagnostic_output.getvalue())['database_connection_and_schema'] == 'ok'
+            run("CREATE ROLE segio_readonly_fixture LOGIN PASSWORD '%s';" % secret)
+            run('GRANT USAGE ON SCHEMA public TO segio_readonly_fixture; '
+                'GRANT SELECT ON ALL TABLES IN SCHEMA public TO segio_readonly_fixture; '
+                'REVOKE SELECT ON approval_document FROM segio_readonly_fixture;', 'cell_000')
+            restricted = live_root/'restricted.conf'
+            restricted.write_bytes(config.read_bytes().replace(b'segio_bulk_fixture', b'segio_readonly_fixture'))
+            settings['db_config'] = str(restricted)
+            worker.write_json(str(live_root/'config.json'), settings)
+            diagnostic_output = StringIO()
+            with redirect_stdout(diagnostic_output):
+                assert diagnose(str(live_root)) == 1
+            assert json.loads(diagnostic_output.getvalue())['error'] == 'db_permission_denied'
+            assert secret not in diagnostic_output.getvalue()
+            settings['db_config'] = str(config)
+            worker.write_json(str(live_root/'config.json'), settings)
             worker.write_json(str(job/'request.json'), {'username':'target','approvals':True,'mail':False,'created_at':1})
             worker.run_job(str(live_root/'config.json'), job_id)
             status = worker.read_json(str(job/'status.json'))

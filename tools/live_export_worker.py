@@ -4,6 +4,7 @@
 from __future__ import print_function
 import hashlib
 import binascii
+import errno
 import json
 import os
 import re
@@ -20,6 +21,31 @@ from export_approval_db import run_export
 from export_schema_from_segio_config import SafeError
 
 PROTOCOL = 'segio-live-archive/1'
+FAILURE_CODES = set(('db_config_invalid', 'db_config_unreadable', 'psql_unavailable',
+    'db_authentication_failed', 'db_permission_denied', 'db_schema_mismatch',
+    'db_query_timeout', 'db_database_missing', 'db_connection_failed', 'db_query_failed',
+    'db_snapshot_mismatch', 'approval_user_not_found', 'cell_data_missing',
+    'mail_path_unconfigured', 'mail_path_missing_or_symlink', 'mail_changed_retry',
+    'mail_unsafe_file', 'mail_unsafe_symlink', 'invalid_identity', 'invalid_metadata',
+    'unsafe_job', 'cancelled', 'server_disk_full', 'server_file_too_large',
+    'server_access_denied', 'server_file_missing', 'export_failed'))
+
+
+def failure_details(exc, stage):
+    code = getattr(exc, 'code', None)
+    if code not in FAILURE_CODES:
+        code = str(exc) if isinstance(exc, SafeError) else None
+    number = getattr(exc, 'errno', None)
+    if code not in FAILURE_CODES:
+        code = {errno.ENOSPC: 'server_disk_full', errno.EFBIG: 'server_file_too_large',
+                errno.EACCES: 'server_access_denied', errno.EPERM: 'server_access_denied',
+                errno.ENOENT: 'server_file_missing'}.get(number, 'export_failed')
+    # Never record exception text, paths, SQL, employee IDs or secrets.
+    category = ('io' if isinstance(exc, (IOError, OSError)) else
+                'validation' if isinstance(exc, SafeError) else
+                'encoding' if isinstance(exc, UnicodeError) else 'unexpected')
+    return code, {'stage': stage, 'category': category,
+                  'errno': number if isinstance(number, int) else None}
 
 
 class MailChanged(SafeError):
@@ -100,7 +126,9 @@ def inventory(root):
     if os.path.isfile(root):
         return [(os.path.basename(root), root, fingerprint(root))]
     result = []
-    for current, dirs, files in os.walk(root):
+    def walk_error(error):
+        raise error
+    for current, dirs, files in os.walk(root, onerror=walk_error):
         for name in dirs:
             if os.path.islink(os.path.join(current, name)):
                 raise SafeError('mail_unsafe_symlink')
@@ -188,10 +216,12 @@ def run_job(config_path, job_id):
         if os.path.exists(os.path.join(job, 'cancel')):
             raise SafeError('cancelled')
     work = os.path.join(job, 'work')
+    stage = 'initializing'
     try:
         os.mkdir(work, 0o700)
         checkpoint()
         if request.get('approvals') is True:
+            stage = 'database'
             status('running', 'database')
             folder, intermediate = run_export(config['db_config'], user, work, cell=config['cell'],
                                                binary=config.get('psql', '/usr/bin/psql'), live_scope=True)
@@ -210,12 +240,14 @@ def run_job(config_path, job_id):
                 manifest['files'][name] = {'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest()}
         checkpoint()
         if request.get('mail') is True:
+            stage = 'mail'
             status('running', 'mail')
             copy_mail(config.get('mail_template'), user, folder, manifest, checkpoint)
         manifest['live_export'] = {'requested_at': request['created_at'], 'job': job_id,
                                    'approvals': request.get('approvals') is True, 'mail': request.get('mail') is True}
         manifest['finished_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         write_json(os.path.join(folder, 'manifest.json'), manifest)
+        stage = 'packing'
         status('running', 'packing')
         archive_path = os.path.join(job, 'archive.zip')
         archive = zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED, allowZip64=True)
@@ -228,6 +260,7 @@ def run_job(config_path, job_id):
         finally:
             archive.close()
         checkpoint()
+        stage = 'hashing'
         digest = hashlib.sha256()
         with open(archive_path, 'rb') as stream:
             while True:
@@ -239,8 +272,18 @@ def run_job(config_path, job_id):
         status('ready', 'ready', version=job_id, bytes=os.path.getsize(archive_path),
                sha256=digest.hexdigest(), counts=manifest['counts'], prepared_at=manifest['finished_at'])
     except Exception as exc:
-        code = str(exc) if isinstance(exc, SafeError) and re.match(r'\A[a-z_]+\Z', str(exc)) else 'export_failed'
-        status('failed', code, diagnostic=exc.diagnostic if isinstance(exc, MailChanged) else None)
+        code, diagnostic = failure_details(exc, stage)
+        if isinstance(exc, MailChanged):
+            diagnostic['mail_change'] = exc.diagnostic
+        status('failed', code, diagnostic=diagnostic)
+        # The client removes finished job folders even on failure. Retain only
+        # the latest anonymous error so admins can diagnose after cleanup.
+        try:
+            write_json(os.path.join(config['root'], 'jobs', 'last-failure.json'),
+                       {'protocol': PROTOCOL, 'phase': code, 'diagnostic': diagnostic,
+                        'failed_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())})
+        except (IOError, OSError):
+            pass
         archive_path = os.path.join(job, 'archive.zip')
         if os.path.isfile(archive_path):
             os.unlink(archive_path)

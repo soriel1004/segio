@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from unittest.mock import Mock
 from urllib.parse import quote_plus
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
@@ -13,6 +14,50 @@ import export_approval_db as exporter
 
 
 class DBExportTests(unittest.TestCase):
+    def test_sqlstate_errors_are_specific_and_credentials_never_escape(self):
+        cases = ((b'28P01', 'db_authentication_failed'), (b'42501', 'db_permission_denied'),
+                 (b'42P01', 'db_schema_mismatch'), (b'42703', 'db_schema_mismatch'),
+                 (b'57014', 'db_query_timeout'), (b'53100', 'server_disk_full'))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root/'db.conf'
+            secret = 'PRIVATE_PASSWORD_AND_SQL_VALUE'
+            config.write_text('DBMS=pgsql\nDBNAME=cell_000\nUSER=fixture\nPW='+secret+'\n')
+            for state, expected in cases:
+                process = Mock(returncode=1)
+                process.communicate.return_value = (b'', b'ERROR:  '+state+b': '+secret.encode())
+                def launch(*args, **kwargs):
+                    passfile = Path(kwargs['env']['PGPASSFILE'])
+                    self.assertTrue(passfile.is_file())
+                    if sys.platform != 'win32':
+                        self.assertEqual(passfile.stat().st_mode & 0o777, 0o600)
+                    self.assertNotIn(secret, repr(args))
+                    return process
+                with self.subTest(state=state), patch.object(exporter.subprocess, 'Popen', side_effect=launch):
+                    with self.assertRaises(exporter.SafeError) as caught:
+                        exporter.psql_readonly(str(config), str(root), ['SELECT 1;'])
+                    self.assertEqual(caught.exception.code, expected)
+                    self.assertNotIn(secret, str(caught.exception))
+                    self.assertFalse((root/'pgpass').exists())
+
+    def test_authenticated_employee_without_approval_profile_can_archive_empty_approvals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cell = root/'cell'
+            (cell/'data').mkdir(parents=True)
+            model = json.loads((Path(exporter.HERE)/'approval_db_columns.json').read_text())
+            rows = {table: [] for table in model}
+            counts = {table: 0 for table in model}
+            with patch.object(exporter, 'query_database', return_value=(rows, counts)):
+                # Administrator ID spelling checks remain strict in CLI mode.
+                with self.assertRaisesRegex(exporter.SafeError, 'Target user'):
+                    exporter.run_export('unused', 'employee', str(root), cell=str(cell))
+                folder, archive = exporter.run_export('unused', 'employee', str(root), cell=str(cell), live_scope=True)
+            manifest = json.loads((Path(folder)/'manifest.json').read_text(encoding='utf-8'))
+            self.assertEqual(manifest['counts']['approval'], 0)
+            self.assertTrue(any('0개' in warning for warning in manifest['warnings']))
+            self.assertTrue(Path(archive).is_file())
+
     def test_encoded_body_is_decoded_then_sanitized_without_changing_literal_text(self):
         with tempfile.TemporaryDirectory() as tmp:
             bundle = exporter.Bundle(tmp, tmp, "employee")

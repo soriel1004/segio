@@ -195,21 +195,43 @@ def read_rows(path):
     return result
 
 
-def query_database(config, username, work, binary="/usr/bin/psql", live_scope=False):
-    with open(os.path.join(HERE, "approval_db_columns.json"), "rb") as stream:
-        model = json.loads(stream.read().decode("utf-8"))
-    queries = make_queries(username, model, live_scope)
-    sql = ["\\set ON_ERROR_STOP on", "BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY;",
-           "SET LOCAL statement_timeout=60000;", "SET LOCAL client_encoding='UTF8';"]
-    counts = " UNION ALL ".join(["SELECT '%s'::text AS table_name,count(*)::text AS row_count FROM (%s) counted" % (table, queries[table]) for table in sorted(queries)])
-    sql.append(copy_command(counts, "counts", ["table_name", "row_count"]))
-    for table in sorted(queries):
-        sql.append(copy_command(queries[table], table, model[table]))
-    sql.extend(["ROLLBACK;", "\\echo SEGIO_DB_EXPORT_COMPLETE"])
-    host, user, database, password = connection_settings(read_config(config))
+def database_error_code(error):
+    # Verbose PostgreSQL errors expose a SQLSTATE. Never return raw stderr,
+    # which can contain credentials, SQL values, paths or application data.
+    states = re.findall(b"(?:ERROR|FATAL):[ \\t]+([0-9A-Z]{5}):", error)
+    codes = {b"28P01": "db_authentication_failed", b"28000": "db_authentication_failed",
+             b"42501": "db_permission_denied", b"42P01": "db_schema_mismatch",
+             b"42703": "db_schema_mismatch", b"42883": "db_schema_mismatch",
+             b"57014": "db_query_timeout", b"3D000": "db_database_missing",
+             b"53100": "server_disk_full"}
+    for state in states:
+        if state in codes:
+            return codes[state]
+        if state.startswith(b"08"):
+            return "db_connection_failed"
+    # Connection failures can be produced by libpq before a SQLSTATE exists.
+    for token, code in ((b"authentication failed", "db_authentication_failed"),
+                        (b"no password supplied", "db_authentication_failed"),
+                        (b"permission denied", "db_permission_denied"),
+                        (b"could not connect", "db_connection_failed"),
+                        (b"connection to server", "db_connection_failed"),
+                        (b"statement timeout", "db_query_timeout")):
+        if token in error.lower():
+            return code
+    return "db_query_failed"
+
+
+def psql_readonly(config, work, sql, binary="/usr/bin/psql"):
+    try:
+        host, user, database, password = connection_settings(read_config(config))
+    except SafeError:
+        raise SafeError("Existing DB configuration is unsupported; values omitted.", "db_config_invalid")
+    except (IOError, OSError):
+        raise SafeError("Existing DB configuration cannot be read.", "db_config_unreadable")
     passfile = os.path.join(work, "pgpass")
     try:
-        with open(passfile, "wb") as stream:
+        descriptor = os.open(passfile, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
             for passhost in ([host, "localhost"] if host.startswith("/") else [host]):
                 fields = [passhost, "5432", database, user, password]
                 stream.write(b":".join([pgpass_escape(v) for v in fields]) + b"\n")
@@ -221,20 +243,39 @@ def query_database(config, username, work, binary="/usr/bin/psql", live_scope=Fa
                     "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=60000"})
         command = [binary, "-X", "-q", "-w", "-h", host, "-p", "5432", "-U", user,
                    "-d", database, "-v", "ON_ERROR_STOP=1"]
-        process = subprocess.Popen(command, cwd=work, env=env, stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            process = subprocess.Popen(command, cwd=work, env=env, stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError:
+            raise SafeError("The configured psql client could not be started.", "psql_unavailable")
         output, error = process.communicate(("\n".join(sql) + "\n").encode("ascii"))
         if process.returncode or b"SEGIO_DB_EXPORT_COMPLETE" not in output:
-            reason = "AUTHENTICATION_FAILED" if b"authentication failed" in error else "DATABASE_QUERY_FAILED"
-            raise SafeError("%s (psql exit %d); archive not completed. Raw errors omitted." % (reason, process.returncode))
-        expected = dict((r["table_name"], int(r["row_count"])) for r in read_rows(os.path.join(work, "counts.csv")))
-        rows = dict((table, read_rows(os.path.join(work, table + ".csv"))) for table in model)
-        if set(expected) != set(rows) or any(len(rows[t]) != expected[t] for t in rows):
-            raise SafeError("Snapshot row count mismatch; archive not completed.")
-        return rows, expected
+            code = database_error_code(error)
+            raise SafeError("%s (psql exit %d); raw errors omitted." % (code, process.returncode), code)
+        return output
     finally:
         if os.path.exists(passfile):
             os.unlink(passfile)
+
+
+def query_database(config, username, work, binary="/usr/bin/psql", live_scope=False):
+    with open(os.path.join(HERE, "approval_db_columns.json"), "rb") as stream:
+        model = json.loads(stream.read().decode("utf-8"))
+    queries = make_queries(username, model, live_scope)
+    sql = ["\\set ON_ERROR_STOP on", "\\set VERBOSITY verbose",
+           "BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY;",
+           "SET LOCAL statement_timeout=60000;", "SET LOCAL client_encoding='UTF8';"]
+    counts = " UNION ALL ".join(["SELECT '%s'::text AS table_name,count(*)::text AS row_count FROM (%s) counted" % (table, queries[table]) for table in sorted(queries)])
+    sql.append(copy_command(counts, "counts", ["table_name", "row_count"]))
+    for table in sorted(queries):
+        sql.append(copy_command(queries[table], table, model[table]))
+    sql.extend(["ROLLBACK;", "\\echo SEGIO_DB_EXPORT_COMPLETE"])
+    psql_readonly(config, work, sql, binary)
+    expected = dict((r["table_name"], int(r["row_count"])) for r in read_rows(os.path.join(work, "counts.csv")))
+    rows = dict((table, read_rows(os.path.join(work, table + ".csv"))) for table in model)
+    if set(expected) != set(rows) or any(len(rows[t]) != expected[t] for t in rows):
+        raise SafeError("Snapshot row count mismatch; archive not completed.", "db_snapshot_mismatch")
+    return rows, expected
 
 
 def raster_mime(data):
@@ -491,11 +532,11 @@ def when(value):
     return text(value)
 
 
-def render_bundle(bundle, rows, counts):
+def render_bundle(bundle, rows, counts, allow_empty=False):
     members = dict((r["uid"], r) for r in rows["approval_member_info"])
     bundle.profiles = members
-    if not rows["approval_document"] and not rows["approval_document_backup"] and bundle.username not in members:
-        raise SafeError("Target user and related documents not found; archive not completed.")
+    if not allow_empty and not rows["approval_document"] and not rows["approval_document_backup"] and bundle.username not in members:
+        raise SafeError("Target user and related documents not found; archive not completed.", "approval_user_not_found")
     grouped = {}
     for table in rows:
         field = "p_no" if table in ("approval_line", "approval_line_backup", "approval_doc_backup", "approval_doc_backup_backup") else "doc_no"
@@ -587,7 +628,7 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
         raise SafeError("Use an exact employee ID containing letters, digits, _, ., @ or -.")
     cell = os.path.realpath(cell or os.path.join(os.path.dirname(config), os.pardir))
     if not os.path.isdir(os.path.join(cell, "data")):
-        raise SafeError("Cell data directory not found. Specify --cell with the actual SEGIO cell path.")
+        raise SafeError("Cell data directory not found. Specify --cell with the actual SEGIO cell path.", "cell_data_missing")
     old_umask = os.umask(0o077)
     folder = tempfile.mkdtemp(prefix="segio-db-" + username + "-", dir=os.path.abspath(output))
     work = os.path.join(folder, "private-query")
@@ -602,7 +643,9 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
         shutil.rmtree(work)
         bundle = Bundle(folder, cell, username)
         notify("Copying attachments and building offline HTML...")
-        items = render_bundle(bundle, rows, counts)
+        # The live bridge already authenticated the employee. An employee with
+        # no approval profile/documents must still be able to archive mail.
+        items = render_bundle(bundle, rows, counts, allow_empty=live_scope)
         bundle.write("catalog.json", json.dumps({"items": items}, ensure_ascii=False))
         warnings = [u"계정 삭제 영향은 검증되지 않았습니다.",
                     u"개인 ID로 확인된 기안·결재·대결·참조·자동회람·개인 수신·댓글·즐겨찾기 및 관련 이력을 수집했습니다. 부서 공용 수신함·기타 권한으로 열리는 문서는 범위가 확인되지 않았습니다.",

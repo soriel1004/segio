@@ -17,7 +17,9 @@ from optparse import OptionParser
 
 
 class SafeError(Exception):
-    pass
+    def __init__(self, message, code=None):
+        Exception.__init__(self, message)
+        self.code = code
 
 
 def read_config(path):

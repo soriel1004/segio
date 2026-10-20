@@ -82,12 +82,13 @@ class BrowserTests(unittest.TestCase):
 @unittest.skipUnless(sys.platform == "win32", "Windows desktop test; Linux has no display")
 class WindowsStartupTests(unittest.TestCase):
     def test_login_window_opens_without_browser_download_or_launch(self):
-        from segio_archive.gui import App, DB_MODE, WEB_MODE
+        from segio_archive.gui import App, APP_TITLE, DB_MODE, WEB_MODE
         with patch("segio_archive.browser.launch_browser") as launch:
             app = App()
             try:
                 app.update_idletasks()
                 self.assertTrue(app.winfo_exists())
+                self.assertTrue(app.title().startswith(APP_TITLE))
                 self.assertEqual(app.user.get(), "")
                 self.assertEqual(app.password.get(), "")
                 self.assertEqual(app.method.get(), DB_MODE)

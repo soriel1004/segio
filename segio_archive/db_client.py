@@ -390,8 +390,27 @@ class DBCollector(PreparedDBCollector):
             'export_already_running':'이 직원의 추출 작업이 이미 진행 중입니다. 완료 후 다시 실행하세요.',
             'export_busy':'서버에서 다른 추출 작업이 진행 중입니다. 잠시 후 다시 실행하세요.',
             'export_process_unavailable':'서버 추출 작업기를 시작하지 못했습니다. Python·실행 계정 권한을 확인하세요.',
+            'db_config_unreadable':'서버 작업기가 기존 db.conf를 읽지 못했습니다. segio 실행 계정의 파일 접근 권한을 확인하세요. [db_config_unreadable]',
+            'db_config_invalid':'기존 db.conf의 접속 항목이 지원 형식과 다릅니다. 암호를 보내지 말고 관리자 진단을 실행하세요. [db_config_invalid]',
+            'psql_unavailable':'서버 작업기가 psql을 실행하지 못했습니다. 설치 위치와 실행 권한을 확인하세요. [psql_unavailable]',
+            'db_authentication_failed':'기존 db.conf로 PostgreSQL 인증에 실패했습니다. 직원 로그인 암호가 아닌 서버의 기존 DB 연결을 확인하세요. [db_authentication_failed]',
+            'db_permission_denied':'DB 접속 계정에 결재 테이블 또는 스키마를 읽을 권한이 없습니다. 관리자 진단을 실행하세요. [db_permission_denied]',
+            'db_schema_mismatch':'서버의 결재 DB 테이블·컬럼 구조가 추출기가 예상한 구조와 다릅니다. 관리자 진단을 실행하세요. [db_schema_mismatch]',
+            'db_query_timeout':'서버의 읽기 전용 결재 DB 조회가 제한 시간을 초과했습니다. [db_query_timeout]',
+            'db_database_missing':'설정된 cell_000 데이터베이스를 찾지 못했습니다. [db_database_missing]',
+            'db_connection_failed':'서버 작업기에서 PostgreSQL에 접속하지 못했습니다. 기존 DB 서비스와 로컬 소켓 경로를 확인하세요. [db_connection_failed]',
+            'db_query_failed':'서버 결재 DB 조회를 완료하지 못했습니다. 관리자 진단을 실행하세요. [db_query_failed]',
+            'db_snapshot_mismatch':'결재 DB 조회 건수와 추출 결과가 일치하지 않습니다. [db_snapshot_mismatch]',
+            'approval_user_not_found':'결재 DB에서 해당 직원의 프로필과 관련 문서를 찾지 못했습니다. 서버 연결 도구를 최신 버전으로 업데이트하세요. [approval_user_not_found]',
+            'cell_data_missing':'서버의 셀 data 폴더가 없거나 작업기가 접근할 수 없습니다. [cell_data_missing]',
+            'server_disk_full':'서버의 추출 작업용 디스크 공간이 부족합니다. [server_disk_full]',
+            'server_file_too_large':'서버 파일 시스템 또는 실행 환경의 단일 파일 크기 제한을 초과했습니다. [server_file_too_large]',
+            'server_access_denied':'서버 작업기가 원본 파일을 읽거나 작업 폴더에 쓸 권한이 없습니다. 관리자 진단을 실행하세요. [server_access_denied]',
+            'server_file_missing':'추출 중 필요한 서버 파일 또는 폴더를 찾지 못했습니다. [server_file_missing]',
+            'mail_unsafe_file':'메일 폴더에 일반 파일이 아닌 항목이 있어 수집을 중단했습니다. [mail_unsafe_file]',
+            'mail_unsafe_symlink':'메일 폴더에 심볼릭 링크가 있어 수집을 중단했습니다. [mail_unsafe_symlink]',
             'cancelled':'DB·MBOX 가져오기를 중단했습니다.',
-        }.get(code,'서버에서 실시간 추출을 완료하지 못했습니다. 서버 작업 권한과 DB·메일 경로를 확인하세요.')
+        }.get(code,'서버 추출 작업에서 처리 오류가 발생했습니다. 관리자 진단의 last_failure 항목을 확인하세요. [export_failed]')
 
     def manual_login_complete(self):
         # A disappearing/detached password frame is not authentication proof.
@@ -452,7 +471,12 @@ class DBCollector(PreparedDBCollector):
                           'ready':'이번 요청의 DB·MBOX 추출 완료'}.get(phase,'서버 추출 작업 확인 중'))
                 previous = phase
             if status.get('state')=='failed':
-                raise CollectionError(self.error_message(phase))
+                stages = {'initializing':'서버 작업 준비', 'database':'서버 결재 DB 추출',
+                          'mail':'서버 MBOX 원본 복사', 'packing':'서버 ZIP 압축',
+                          'hashing':'서버 ZIP 검증'}
+                diagnostic = status.get('diagnostic')
+                stage = stages.get(diagnostic.get('stage')) if isinstance(diagnostic,dict) else None
+                raise CollectionError((stage+' 단계: ' if stage else '')+self.error_message(phase))
             if status.get('state')=='ready':
                 if (type(status.get('bytes')) is not int or status['bytes']<=0 or
                     not re.fullmatch(r'[a-f0-9]{64}',str(status.get('sha256','')))):

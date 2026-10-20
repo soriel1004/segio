@@ -71,6 +71,57 @@ raise SystemExit(worker.main())
 
 
 class LiveWorkerTests(unittest.TestCase):
+    def test_worker_records_anonymous_failure_after_cleaning_partial_exports(self):
+        import errno
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            create_fixture(root)
+            for number, exception, code in (
+                    (1, worker.SafeError('DO_NOT_LOG_DB_PASSWORD', 'db_permission_denied'), 'db_permission_denied'),
+                    (2, OSError(errno.ENOSPC, 'DO_NOT_LOG_MAIL_PATH'), 'server_disk_full')):
+                job_id=f'{number:032x}'
+                job=root/'jobs'/job_id
+                job.mkdir()
+                worker.write_json(str(job/'request.json'), {'username':'employee','approvals':True,'mail':True,'created_at':1})
+                with patch.object(worker, 'run_export', side_effect=exception):
+                    worker.run_job(str(root/'config.json'), job_id)
+                status=worker.read_json(str(job/'status.json'))
+                self.assertEqual(status['state'], 'failed')
+                self.assertEqual(status['phase'], code)
+                self.assertEqual(status['diagnostic']['stage'], 'database')
+                self.assertFalse((job/'work').exists())
+                self.assertFalse((job/'archive.zip').exists())
+                shutil.rmtree(job)  # Client cleanup must not erase safe diagnosis.
+                text=(root/'jobs/last-failure.json').read_text()
+                self.assertEqual(json.loads(text)['phase'], code)
+                for secret in ('employee', 'DO_NOT_LOG', str(root), job_id):
+                    self.assertNotIn(secret, text)
+
+    def test_diagnostic_checks_schema_without_selecting_records_and_cleans_password_file(self):
+        from io import StringIO
+        import diagnose_live_archive as diagnostic
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            create_fixture(root)
+            seen=[]
+            def probe(config, folder, sql, binary):
+                seen.extend(sql)
+                (Path(folder)/'pgpass').write_text('DO_NOT_REPORT_PASSWORD')
+                raise worker.SafeError('DO_NOT_REPORT_PASSWORD', 'db_schema_mismatch')
+            output=StringIO()
+            with patch.object(diagnostic, 'psql_readonly', side_effect=probe), patch('sys.stdout', output):
+                self.assertEqual(diagnostic.diagnose(str(root)), 1)
+            value=json.loads(output.getvalue())
+            self.assertEqual(value['error'], 'db_schema_mismatch')
+            self.assertEqual(value['diagnostic']['stage'], 'database')
+            self.assertNotIn('DO_NOT_REPORT_PASSWORD', output.getvalue())
+            self.assertFalse(list((root/'jobs').glob('.diagnose-*')))
+            selects=[sql for sql in seen if sql.startswith('SELECT ')]
+            self.assertEqual(len(selects), 14)
+            self.assertTrue(all(sql.endswith('WHERE false;') for sql in selects))
+            self.assertTrue(any(sql.startswith('EXPLAIN SELECT ') for sql in seen))
+            self.assertIn('BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY;', seen)
+
     def test_unencoded_cp949_rfc822_subject_is_searchable_and_raw_bytes_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
@@ -238,6 +289,30 @@ class LiveInstallationTests(unittest.TestCase):
 @unittest.skipUnless(PHP,'PHP CLI required')
 class LiveBridgeTests(NativePHPFixture, unittest.TestCase):
     """Real native-auth fixture, detached worker and streaming client."""
+
+    def test_server_database_failure_survives_client_cleanup_without_secrets(self):
+        launcher=self.live_root/'worker.py'
+        original=launcher.read_bytes()
+        try:
+            text=original.decode()
+            text=text.replace('worker.run_export=synthetic_export',
+                "def fail(*args,**kwargs):\n    raise worker.SafeError('PRIVATE_DB_PASSWORD', 'db_schema_mismatch')\nworker.run_export=fail")
+            launcher.write_text(text,encoding='utf-8')
+            with tempfile.TemporaryDirectory() as tmp:
+                config=Config(self.url+'/', 'employee', Path(tmp),mail=True,pdf=False,
+                              allow_http=True,headless=True,timeout_ms=10000,
+                              browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
+                with self.assertRaisesRegex(CollectionError, '서버 결재 DB 추출.*db_schema_mismatch') as caught:
+                    DBCollector(config).run(PASSWORD)
+                self.assertNotIn('PRIVATE_DB_PASSWORD',str(caught.exception))
+                self.assertEqual(list(Path(tmp).iterdir()),[])
+            self.assertFalse([p for p in (self.live_root/'jobs').iterdir() if p.is_dir()])
+            saved=(self.live_root/'jobs/last-failure.json').read_bytes()
+            self.assertEqual(json.loads(saved)['phase'],'db_schema_mismatch')
+            self.assertNotIn(b'PRIVATE_DB_PASSWORD',saved)
+            self.assertNotIn(b'employee',saved)
+        finally:
+            launcher.write_bytes(original)
     @classmethod
     def setUpClass(cls):
         super().setUpClass()

@@ -54,7 +54,7 @@ koro → /home/segio/cell000/home/k/koro/mbox
 
 ## Windows에서 가져오기
 
-1. **[Windows v0.3.1 실행 ZIP](https://github.com/soriel1004/segio/actions/runs/39387100611/artifacts/12247444521)**을 GitHub 로그인 후 받습니다. 404 화면이면 GitHub 로그인 후 링크를 다시 엽니다. 새 폴더에 압축을 모두 풀고, 안에 ZIP이 또 있으면 그것도 푼 뒤 `SEGIOArchive.exe`를 실행합니다. 창 제목의 `v0.3.1`을 확인합니다. 소스 ZIP은 Python 3.12 64비트 설치 후 `run_windows.bat`을 실행합니다.
+1. [GitHub Actions](https://github.com/soriel1004/segio/actions)의 최신 **성공한 v0.3.2 이상** 실행에서 `SEGIOArchive-Windows`를 GitHub 로그인 후 받습니다. 새 폴더에 압축을 모두 풀고, 안에 ZIP이 또 있으면 그것도 푼 뒤 `SEGIOArchive.exe`를 실행합니다. `_internal` 등 함께 들어 있는 폴더를 유지합니다. 창 제목 **그룹웨어 문서 및 메일 백업 및 검색 · v0.3.2**를 확인합니다. 소스 ZIP은 Python 3.12 64비트 설치 후 `run_windows.bat`을 실행합니다.
 2. 방식은 **DB·MBOX 바로 가져오기**로 둡니다. **결재 문서**, **메일**은 기본으로 둘 다 선택되며 하나만 가져올 수도 있습니다.
 3. 기존 SEGIO 로그인 주소, 직원 ID(예: `koro`), 그 직원의 SEGIO 암호, 저장 폴더를 입력합니다. DB 암호나 서버 관리자 암호는 입력하지 않습니다.
 4. 기존 HTTP 주소를 사용할 경우 **암호화되지 않은 HTTP 연결 허용**을 선택합니다. HTTPS에서는 인증서 검증을 유지합니다.
@@ -64,6 +64,8 @@ koro → /home/segio/cell000/home/k/koro/mbox
 저장 이름은 **`segio-koro.zip`**, **`segio-koro`**입니다. 기존 이름이 있으면 `-2`, `-3`을 붙입니다. 다시 실행하면 당시 DB와 MBOX를 새로 가져옵니다. 암호·쿠키는 보관본이나 설정 파일에 저장하지 않습니다. 직접 로그인 옵션도 실제 인증 ID와 입력 ID가 다르면 거부합니다.
 
 v0.3.1은 SEGIO의 대문자 `UID`/`PASSWD`, 숨은 응답 프레임과 직접 로그인 중 바뀌는 폼 목적지를 지원합니다. 직접 로그인은 비밀번호 입력란이 사라졌는지가 아니라 서버의 네이티브 인증 ID가 입력 ID와 일치하는지로 완료를 판단합니다. 화면 전환 중 프레임이 분리되거나 로그인 팝업이 닫혀도 다른 로그인 창이 유지되면 확인을 계속합니다. 설정 응답 실패·JSON 오류·연결 시간 초과는 단계와 고정 오류 코드로 안내하며 응답 본문·암호·쿠키는 오류에 넣지 않습니다.
+
+v0.3.2는 인증된 직원의 결재 프로필·관련 문서가 모두 없더라도 결재 0건을 경고로 기록하고 메일 수집을 계속합니다. 관리자 CLI의 잘못된 ID 검사와 DB 접속·조회 실패는 여전히 실패로 처리합니다. DB 조회 실패를 결재 0건으로 간주하지 않습니다.
 
 기본 로그인 주소:
 
@@ -114,7 +116,35 @@ http://192.168.0.100/segio/archive/live.php?action=info
 | `MANUAL_LOGIN_TIMEOUT` / `LOGIN_NOT_CONFIRMED` | 같은 서버에 로그인했는지, 확인 URL의 네이티브 사용자와 Windows 입력 ID가 같은지 확인 |
 | `native_login_required` / `identity_conflict` | 기존 SEGIO 인증 `REMOTE_USER`가 새 PHP 경로에 전달되는지 확인. HTTP 헤더나 입력 ID를 인증값으로 대체하지 않음 |
 | `export_process_unavailable` | 웹 실행 계정의 고정 코드 읽기·Python 실행 권한, PHP `proc_open` 확인 |
-| `export_failed` | 웹 실행 계정의 DB 설정·첨부 읽기 권한, 기존 `psql` 접속 확인 |
+| `db_authentication_failed` / `db_connection_failed` | 기존 db.conf의 DB 인증 또는 로컬 PostgreSQL 연결 확인 |
+| `db_permission_denied` / `db_schema_mismatch` | DB 역할의 읽기 권한 또는 실제 결재 테이블·컬럼 구조 확인 |
+| `server_access_denied` / `server_disk_full` | 표시된 실패 단계의 파일 접근 권한 또는 서버 작업 디스크 여유 확인 |
+| `export_failed` | 아래 진단으로 최근 오류 단계 확인. v0.3.2 서버 도구도 함께 설치 |
+
+### 로그인 직후 추출 실패 진단
+
+Windows 프로그램은 성공·실패 작업의 임시 폴더를 정리하므로 종료 후 `jobs/*/status.json`이 없는 것만으로 작업이 실행되지 않았다고 판단할 수 없습니다. v0.3.2부터 `jobs/last-failure.json`에 최근 오류 코드·단계·분류만 남깁니다. 직원 ID·암호·DB 설정값·파일 경로·SQL·문서·메일 내용은 기록하지 않습니다. 이 파일은 웹에 공개하지 않습니다.
+
+최신 `tools` 전체를 복사하고 위의 설치 명령을 다시 실행한 뒤, root에서 다음을 실행합니다.
+
+```bash
+cd /root/tools
+python ./diagnose_live_archive.py --web-user segio \
+  --private-root /home/segio/cell000/etc/segio-live-archive
+```
+
+진단은 권한을 실제 웹 OS 계정으로 낮춘 뒤 설치된 도구를 실행합니다. 임시 암호 파일을 자동 삭제하며, 기존 DB 연결로 읽기 전용 트랜잭션 안에서 14개 대상 테이블의 허용 컬럼·권한과 실제 조회 SQL의 `EXPLAIN`을 검사합니다. 직원 자료를 조회·추출하지 않고 결과는 고정 검사 항목과 오류 코드만 출력합니다. `database_connection_and_schema: ok`이면 연결·구조 검사는 통과한 것이며 실제 직원 자료 추출 완료를 뜻하지는 않습니다.
+
+개인 메일 경로·읽기 권한까지 확인하려면 직원 ID를 직접 입력합니다. 암호는 입력하지 않습니다. 파일 내용은 출력·보관하지 않습니다.
+
+```bash
+read -r -p "SEGIO login ID: " SEGIO_TARGET_ID
+python ./diagnose_live_archive.py --web-user segio \
+  --private-root /home/segio/cell000/etc/segio-live-archive \
+  --user "$SEGIO_TARGET_ID"
+```
+
+기존 `db.conf`·`psql`의 읽기·실행 권한과 `jobs` 쓰기 검사가 모두 성공해도 DB 인증·테이블 권한·구조·해당 직원 MBOX 접근까지 검증된 것은 아닙니다. 진단의 한 줄 JSON 결과만 전달하면 됩니다.
 | `mail_path_missing_or_symlink` | 본인의 실제 MBOX 경로·규칙·심볼릭 링크 여부 확인 |
 | `mail_changed_retry` | 복사 중 메일 변경. 변경이 적은 시간에 다시 실행 |
 | `export_already_running` / `export_busy` | 같은 직원은 한 작업, 전체는 네 작업까지 실행. 완료 후 재시도 |

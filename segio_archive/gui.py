@@ -15,12 +15,13 @@ from . import __version__
 
 DB_MODE = "DB·MBOX 바로 가져오기"
 WEB_MODE = "웹 화면 수집 (결재·메일)"
+APP_TITLE = "그룹웨어 문서 및 메일 백업 및 검색"
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("SEGIO 퇴사자 문서·메일 보관 · v" + __version__)
+        self.title(APP_TITLE + " · v" + __version__)
         self.geometry("890x820")
         self.minsize(800, 700)
         self.events = queue.Queue()
@@ -46,7 +47,7 @@ class App(tk.Tk):
     def build(self):
         panel = ttk.Frame(self, padding=24)
         panel.pack(fill="both", expand=True)
-        ttk.Label(panel, text="퇴사자의 문서와 메일을 계정 없이 열람", font=("Malgun Gothic", 18, "bold")).pack(anchor="w")
+        ttk.Label(panel, text=APP_TITLE, font=("Malgun Gothic", 18, "bold")).pack(anchor="w")
         ttk.Label(panel, text="계정이 살아 있을 때 수집하세요. 계정·문서·메일을 삭제하는 기능은 없습니다.", wraplength=770).pack(anchor="w", pady=(8, 16))
         method_row = ttk.Frame(panel)
         method_row.pack(fill="x", pady=(0, 8))

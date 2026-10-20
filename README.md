@@ -1,8 +1,8 @@
-# SEGIO 문서·메일 보관 프로그램
+# 그룹웨어 문서 및 메일 백업 및 검색
 
 Windows에서 직원의 **SEGIO ID·암호**로 로그인해 현재 결재 DB 자료와 서버 MBOX 전체를 가져오고, 계정 없이 검색·열람하는 프로그램입니다. 기본 방식은 **DB·MBOX 바로 가져오기**입니다. 결재·메일 웹페이지를 순회하지 않으며 기존 SEGIO 로그인에만 브라우저를 사용합니다.
 
-**v0.3.1은 직접 로그인 완료 판정과 SEGIO 대문자 ID 입력란을 수정하고, 비공개 설정의 기본 위치를 셀의 `etc` 경로로 변경했습니다.** [최종 Actions #19](https://github.com/soriel1004/segio/actions/runs/39387100611)에서 Linux·Windows 시험과 EXE 빌드가 모두 통과했습니다. **[Windows 실행 ZIP 직접 다운로드](https://github.com/soriel1004/segio/actions/runs/39387100611/artifacts/12247444521)**는 GitHub 로그인 후 사용할 수 있습니다. 실제 문서·메일 형식 대조와 생성 EXE의 현장 실행은 설치 후 확인이 필요합니다.
+**v0.3.2는 프로그램 제목을 변경하고, 결재 프로필이 없는 인증 직원의 메일 수집 중단을 수정했습니다.** DB 인증·테이블 권한·구조 차이·파일 접근·디스크 부족 오류를 단계와 코드로 구분하며, 작업 폴더를 정리한 뒤에도 개인정보 없는 최근 오류를 남깁니다. 서버의 실제 실패 원인은 아래 진단으로 확인해야 합니다. Windows 빌드는 [GitHub Actions](https://github.com/soriel1004/segio/actions)에서 확인할 수 있습니다.
 
 **서버에는 연결 기능을 한 번 설치합니다.** 이후 Windows에서 요청할 때마다 인증된 직원의 자료를 새로 추출합니다. 직원별 보관 ZIP을 미리 만들 필요가 없습니다. 자세한 명령과 오류 확인은 **[서버 설치·Windows 실행 안내](docs/WINDOWS_LOGIN.md)**를 보세요.
 
@@ -22,7 +22,7 @@ python ./install_live_archive.py --web-user segio \
 
 ## Windows에서 실행
 
-1. [GitHub Actions](https://github.com/soriel1004/segio/actions)에서 최신 **성공한 v0.3.1 이상** 실행을 열고 `SEGIOArchive-Windows` 아티팩트를 받습니다. 압축을 풀어 폴더 전체를 유지하고 `SEGIOArchive.exe`를 실행합니다.
+1. [GitHub Actions](https://github.com/soriel1004/segio/actions)에서 최신 **성공한 v0.3.2 이상** 실행을 열고 `SEGIOArchive-Windows` 아티팩트를 받습니다. 압축을 풀어 `_internal`을 포함한 폴더 전체를 유지하고 `SEGIOArchive.exe`를 실행합니다.
 2. 소스 ZIP으로 실행하려면 Python 3.12 64비트를 설치한 뒤 새 폴더에 압축을 풀고 `run_windows.bat`을 실행합니다. 로그인 창을 열기 전에 Chromium을 다운로드하지 않습니다.
 3. **DB·MBOX 바로 가져오기**에서 서버 주소, 직원 SEGIO ID·암호, 저장 폴더를 입력합니다. **결재 문서**, **메일**은 둘 다 기본 선택이며 하나만 선택할 수도 있습니다.
 4. **로그인하고 수집 시작**을 누릅니다. 로그인 → 현재 DB 읽기 → MBOX 전체 복사 → 다운로드·무결성 검증 → Windows 검색 DB 생성 순서로 진행합니다.
