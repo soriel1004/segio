@@ -1,16 +1,16 @@
 # 그룹웨어 문서 및 메일 백업 및 검색
 
-Windows에서 **서버 관리자 SSH 계정**으로 접속해 지정 직원의 결재 DB 자료와 MBOX 전체를 백업하고, 서버 연결 없이 검색·열람합니다. **v0.4.0의 기본 방식은 SSH**이며 서버 웹페이지·PHP·직원 로그인 창을 사용하지 않습니다.
+Windows에서 **서버 관리자 SSH 계정**으로 접속해 지정 직원의 결재 DB 자료와 MBOX 전체를 백업하고, 서버 연결 없이 검색·열람합니다. **v0.4.1의 기본 방식은 SSH**이며 서버 웹페이지·PHP·직원 로그인 창을 사용하지 않습니다.
 
 서버 기본값은 **192.168.0.100 / 포트 22 / SSH 계정 root**입니다. SSH 암호와 백업할 직원의 SEGIO ID는 별도 항목입니다. 이 방식은 관리자가 직원 자료를 백업하는 도구이며 직원 SEGIO 암호를 검증하지 않습니다.
 
 **[SSH 사용 안내](docs/SSH_ARCHIVE.md)** · **[최신 소스 ZIP](https://github.com/soriel1004/segio/archive/refs/heads/main.zip)** · **[Windows 빌드·다운로드](https://github.com/soriel1004/segio/actions)**
 
-**[Windows v0.4.0 직접 다운로드](https://github.com/soriel1004/segio/actions/runs/39398463090/artifacts/12254435188)** (GitHub 로그인 필요). [최종 Actions #24](https://github.com/soriel1004/segio/actions/runs/39398463090)에서 Linux·Windows 시험과 실행 파일 빌드가 통과했습니다.
+**[Windows v0.4.1 직접 다운로드](https://github.com/soriel1004/segio/actions/runs/39402931283/artifacts/12255182407)** (GitHub 로그인 필요). [최종 Actions #25](https://github.com/soriel1004/segio/actions/runs/39402931283)에서 Linux·Windows 시험과 실행 파일 빌드가 통과했습니다.
 
 ## Windows에서 실행
 
-1. GitHub Actions의 최신 **성공한 v0.4.0 이상** 실행에서 `SEGIOArchive-Windows`를 받습니다. GitHub 로그인이 필요합니다. 압축을 모두 풀고 `_internal`, `tools`를 포함한 폴더 전체를 유지합니다.
+1. GitHub Actions의 최신 **성공한 v0.4.1 이상** 실행에서 `SEGIOArchive-Windows`를 받습니다. GitHub 로그인이 필요합니다. 압축을 모두 풀고 `_internal`, `tools`를 포함한 폴더 전체를 유지합니다.
 2. `SEGIOArchive.exe`를 실행하고 **SSH로 DB·MBOX 가져오기 (관리자)**를 사용합니다.
 3. SSH 서버 `192.168.0.100`, 포트 `22`, 계정 `root`, **서버 SSH 암호**, 백업할 직원의 **SEGIO ID**, Windows 저장 위치를 입력합니다. 개인키 인증도 지원합니다.
 4. **로그인하고 수집 시작**을 누르고 처음 접속하는 서버의 공개 지문을 확인합니다. 지문 확인 방법은 [SSH 안내](docs/SSH_ARCHIVE.md)에 있습니다.

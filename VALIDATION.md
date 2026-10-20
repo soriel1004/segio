@@ -10,6 +10,8 @@ SSH 보관본의 첫 화면에 종류별 건수와 100건 단위 목록, 결재/
 
 로컬 전체 시험 77개에서 실패·오류 없이 완료했습니다. Windows GUI 1개와 관리형 Chromium의 file URL 차단으로 직접 열기 2사례는 건너뛰었습니다. 로컬 HTTP 브라우저에서는 1,102개 메일의 초기 목록·쪽 이동, 한글·리터럴 `%_`·메일 주소 검색, 탭 전환, 빈 결과, Enter·검색 버튼, 12px 적용, 제목 내 HTML 실행 방지와 외부 요청 없음을 확인했습니다. GitHub Actions에서는 정책 제한이 없는 Playwright Chromium으로 실제 file URL 시험도 수행합니다.
 
+최종 [Actions #25](https://github.com/soriel1004/segio/actions/runs/39402931283) (`38bf8ed`)에서 Linux·Windows 검사와 Windows EXE 빌드가 모두 통과했습니다. 관리 정책으로 차단된 로컬 환경과 달리 CI의 실제 file URL 검색·메일 전용 첫 화면 시험도 통과했습니다. Windows v0.4.1 아티팩트 ID는 `12255182407`, 페이지 표시 373 MB, SHA-256은 `8aac3775717e65a8082ba7a73a2eaaead68d7dce18d1259737a486d69f5bcefc`입니다. 실제 사용자 PC의 UI 및 운영 40GB 자료의 갱신은 아직 현장에서 확인하지 않았습니다.
+
 ## v0.4.0 관리자 SSH·SFTP 직접 백업
 
 기본 방식을 SSH로 변경했습니다. 사용자 지정 기본 서버는 `192.168.0.100:22`, OS 계정은 `root`이며 직원의 SEGIO ID는 별도로 지정합니다. 관리자 SSH 인증으로 실행하는 도구이며 직원의 SEGIO 암호를 검증하지 않습니다. 서버 원본 메일을 SFTP로 직접 내려받고 서버에 MBOX 전체 복사본·전송 ZIP을 만들지 않습니다. ZIP 생성은 Windows의 선택 사항입니다.
