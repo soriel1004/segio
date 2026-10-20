@@ -4,7 +4,7 @@ v0.4.3부터 Windows 화면은 **관리자 SSH 접속**으로 고정합니다. �
 
 ## Windows에서 실행
 
-1. **[Windows v0.4.2 직접 다운로드](https://github.com/soriel1004/segio/actions/runs/39511449771/artifacts/12305203438)**로 `SEGIOArchive-Windows`를 받습니다. GitHub 로그인 후 사용합니다. ZIP을 모두 풀고 `_internal`, `tools` 등 함께 있는 폴더를 유지한 채 `SEGIOArchive.exe`를 실행합니다. 제목의 `v0.4.3`을 확인합니다.
+1. **[Windows v0.4.3 직접 다운로드](https://github.com/soriel1004/segio/actions/runs/39514202643/artifacts/12307306732)**로 `SEGIOArchive-Windows`를 받습니다. GitHub 로그인 후 사용합니다. ZIP을 모두 풀고 `_internal`, `tools` 등 함께 있는 폴더를 유지한 채 `SEGIOArchive.exe`를 실행합니다. 제목의 `v0.4.3`을 확인합니다.
 2. 실행하면 SSH 입력 화면이 바로 표시됩니다. 별도로 가져오기 방식을 선택하지 않습니다.
 3. 아래 항목을 입력합니다.
 
