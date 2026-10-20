@@ -1,5 +1,7 @@
 # 두 프로그램 공용 tools
 
+**[공용 tools ZIP 바로 다운로드](https://github.com/soriel1004/segio/raw/refs/heads/main/downloads/segio-shared-tools.zip)**
+
 이 폴더 전체를 **segio의 SSH 백업 프로그램(v0.4.3)**과 **segio-web의 개인 SEGIO 로그인 프로그램**에 함께 사용할 수 있습니다. SSH 업로드 파일 이름과 두 통신 규약(`segio-ssh-archive/1`, `segio-live-archive/1`)은 유지합니다. 프로그램 본체와 `_internal` 폴더는 각 프로그램의 것을 사용하세요.
 
 ## Windows 프로그램에 적용
