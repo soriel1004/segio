@@ -5,33 +5,74 @@ on:
     paths:
       - 'segio_archive/**'
       - 'tests/**'
+      - 'tools/**'
       - 'requirements.txt'
       - 'build_windows.ps1'
       - 'launch.py'
       - 'run_windows.bat'
       - 'install_browser_windows.bat'
       - '.github/workflows/windows.yml'
+permissions:
+  contents: read
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
 jobs:
-  package:
-    runs-on: windows-latest
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      SEGIO_TEST_PHP: php
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - name: Install and test
-        shell: pwsh
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Install test Chromium with Linux dependencies
+        if: runner.os == 'Linux'
+        run: python -m playwright install --with-deps chromium
+      - name: Install test Chromium on Windows
+        if: runner.os == 'Windows'
+        run: python -m playwright install chromium
+      - name: Select Playwright test browser
+        shell: python
         run: |
-          python -m pip install -r requirements.txt
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m playwright install chromium
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m unittest discover -s tests -v
-          exit $LASTEXITCODE
+          import os
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              executable = p.chromium.executable_path
+          assert Path(executable).is_file(), 'Installed test Chromium not found'
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as stream:
+              stream.write(f'SEGIO_TEST_BROWSER={executable}\n')
+      - name: Test
+        run: python tools/run_ci_tests.py
+  package:
+    name: Build Windows package
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - name: Build Windows application
         shell: pwsh
         run: ./build_windows.ps1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: SEGIOArchive-Windows
           path: dist/SEGIOArchive-Windows.zip
+          if-no-files-found: error

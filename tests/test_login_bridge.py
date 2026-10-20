@@ -16,7 +16,7 @@ import tempfile
 import time
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,8 +31,12 @@ PHP = os.environ.get('SEGIO_TEST_PHP') or shutil.which('php')
 PASSWORD = 'synthetic-password-never-save'
 ROUTER = r'''<?php
 /* Synthetic native session, not part of the deployed bridge. */
-session_name('SEGIO_TEST_SESSION'); session_start();
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+if ($path==='/__bridge_test_ready__') {
+    header('Content-Type: application/json');
+    echo json_encode(array('fixture'=>'__FIXTURE_ID__')); return;
+}
+session_name('SEGIO_TEST_SESSION'); session_start();
 if ($path==='/login' && $_SERVER['REQUEST_METHOD']==='POST') {
     if (isset($_POST['uid'], $_POST['password']) &&
         in_array($_POST['uid'], array('employee','other'), true) &&
@@ -54,11 +58,21 @@ echo '<html><body><form method="post" action="/login"><input name="uid"><input n
 '''
 
 
+def local_opener(jar=None):
+    # This is a real loopback integration test, independent of the global
+    # urlopen opener, OS proxy configuration and unrelated network mocks.
+    handlers = [urllib.request.ProxyHandler({})]
+    if jar is not None:
+        handlers.append(urllib.request.HTTPCookieProcessor(jar))
+    return urllib.request.build_opener(*handlers)
+
+
 @unittest.skipUnless(PHP, 'Optional PHP CLI needed: set SEGIO_TEST_PHP')
 class LoginBridgeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.temp.cleanup)
         cls.root = Path(cls.temp.name)
         private = cls.root/'private'
         (private/'users').mkdir(parents=True)
@@ -72,22 +86,31 @@ class LoginBridgeTests(unittest.TestCase):
                       'sha256':hashlib.sha256(body).hexdigest(), 'counts':{'approval':1},
                       'prepared_at':'2026-10-20T00:00:00Z'}
         name = hashlib.sha256(b'employee').hexdigest()+'.json'
-        (private/'users'/name).write_text(json.dumps(cls.record))
-        php = (ROOT/'tools/login_archive_bridge.php').read_text()
-        (cls.root/'bridge.php').write_text(php.replace('__PRIVATE_ROOT__', str(private)))
-        (cls.root/'router.php').write_text(ROUTER)
+        (private/'users'/name).write_text(json.dumps(cls.record), encoding='utf-8')
+        php = (ROOT/'tools/login_archive_bridge.php').read_text(encoding='utf-8')
+        # PHP single-quoted literals must preserve Windows paths and any quote
+        # in the temporary parent path. Avoid relying on the host encoding.
+        private_literal = private.as_posix().replace("'", "\\'")
+        (cls.root/'bridge.php').write_text(php.replace('__PRIVATE_ROOT__', private_literal), encoding='utf-8')
+        cls.fixture_id = os.urandom(16).hex()
+        (cls.root/'router.php').write_text(ROUTER.replace('__FIXTURE_ID__', cls.fixture_id), encoding='utf-8')
         (cls.root/'sessions').mkdir()
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
         cls.url = f'http://127.0.0.1:{port}'
-        cls.process = subprocess.Popen([PHP, '-n', '-d', 'session.save_path='+str(cls.root/'sessions'),
-                                        '-S', f'127.0.0.1:{port}', str(cls.root/'router.php')],
+        cls.process = subprocess.Popen([PHP, '-n', '-d', 'session.save_path='+(cls.root/'sessions').as_posix(),
+                                        '-S', f'127.0.0.1:{port}', '-t', cls.root.as_posix(),
+                                        (cls.root/'router.php').as_posix()],
                                        cwd=cls.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cls.addClassCleanup(cls.stop_server)
+        opener = local_opener()
         for attempt in range(100):
             try:
-                urllib.request.urlopen(cls.url, timeout=1).close()
-                break
+                with opener.open(cls.url+'/__bridge_test_ready__', timeout=1) as response:
+                    if response.status==200 and json.load(response)=={'fixture':cls.fixture_id}:
+                        break
+                    raise RuntimeError('Unexpected response from test PHP router')
             except (OSError, urllib.error.URLError):
                 if cls.process.poll() is not None:
                     raise RuntimeError('Test PHP process failed to start')
@@ -96,26 +119,48 @@ class LoginBridgeTests(unittest.TestCase):
             raise RuntimeError('Test PHP process did not start')
 
     @classmethod
-    def tearDownClass(cls):
-        cls.process.terminate()
+    def stop_server(cls):
+        if cls.process.poll() is None:
+            cls.process.terminate()
         cls.process.wait(timeout=10)
-        cls.temp.cleanup()
+
+    def assert_bridge_error(self, opener, request, status, code, **kwargs):
+        # Keep the HTTPError contract: accepting a 200 JSON error would hide a
+        # broken server status. Also identify which endpoint/error was tested.
+        with self.assertRaises(urllib.error.HTTPError,
+                               msg=f'Expected HTTP {status} / {code}') as caught:
+            with opener.open(request, timeout=5, **kwargs) as response:
+                self.fail(f'Expected HTTP {status} / {code}, received HTTP {response.status}: '
+                          f'{response.read(256)!r}')
+        with caught.exception as response:
+            self.assertEqual(response.code, status)
+            payload = json.load(response)
+        self.assertEqual(payload.get('protocol'), 'segio-login-archive/1')
+        self.assertEqual(payload.get('error'), code)
 
     def logged_in(self, username='employee'):
         jar = http.cookiejar.CookieJar()
-        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+        opener = local_opener(jar)
         data = urllib.parse.urlencode({'uid':username, 'password':PASSWORD}).encode()
-        opener.open(self.url+'/login', data=data).close()
+        with opener.open(self.url+'/login', data=data, timeout=5) as response:
+            self.assertEqual(response.status, 200)
         return opener
 
     def test_no_native_identity_rejects_spoofed_user_headers_and_query_ids(self):
         request = urllib.request.Request(self.url+'/segio/archive/bridge.php?action=info&uid=employee',
                                          headers={'Remote-User':'employee', 'X-Remote-User':'employee',
                                                   'Authorization':'Basic ZW1wbG95ZWU6cHc='})
-        with self.assertRaises(urllib.error.HTTPError) as caught:
-            urllib.request.urlopen(request)
-        self.assertEqual(caught.exception.code, 401)
-        self.assertEqual(json.load(caught.exception)['error'], 'native_login_required')
+        self.assert_bridge_error(local_opener(), request, 401, 'native_login_required')
+
+    def test_global_urlopen_mock_and_system_proxy_do_not_replace_loopback_responses(self):
+        # A broad mock returning HTTP 200 used to turn assertRaises(HTTPError)
+        # into "HTTPError not raised". This test must still reach the real PHP
+        # bridge with its normal HTTP error handlers and a fresh cookie jar.
+        with patch('urllib.request.urlopen', return_value=Mock(status=200)) as mocked_open, \
+             patch('urllib.request.getproxies', return_value={'http':'http://127.0.0.1:1'}):
+            self.assert_bridge_error(local_opener(), self.url+'/segio/archive/bridge.php',
+                                     401, 'native_login_required')
+            mocked_open.assert_not_called()
 
     def test_other_employee_cannot_get_published_employee_archive(self):
         opener = self.logged_in('other')
@@ -123,22 +168,17 @@ class LoginBridgeTests(unittest.TestCase):
             result = json.load(response)
         self.assertEqual(result['username'], 'other')
         self.assertIsNone(result['archive'])
-        with self.assertRaises(urllib.error.HTTPError) as caught:
-            opener.open(self.url+'/segio/archive/bridge.php?action=download&version='+self.record['version'])
-        self.assertEqual(caught.exception.code, 404)
-        with self.assertRaises(urllib.error.HTTPError) as caught:
-            opener.open(self.url+'/segio/archive/bridge.php?action=download&uid=employee')
-        self.assertEqual(caught.exception.code, 400)
+        self.assert_bridge_error(opener, self.url+'/segio/archive/bridge.php?action=download&version='+self.record['version'],
+                                 404, 'archive_not_prepared')
+        self.assert_bridge_error(opener, self.url+'/segio/archive/bridge.php?action=download&uid=employee',
+                                 400, 'unexpected_parameter')
 
     def test_get_only_and_snapshot_version_checked_before_download(self):
         opener = self.logged_in()
         endpoint = self.url+'/segio/archive/bridge.php'
-        with self.assertRaises(urllib.error.HTTPError) as caught:
-            opener.open(endpoint+'?action=download&version='+'b'*32)
-        self.assertEqual(caught.exception.code, 409)
-        with self.assertRaises(urllib.error.HTTPError) as caught:
-            opener.open(endpoint, data=b'action=delete')
-        self.assertEqual(caught.exception.code, 405)
+        self.assert_bridge_error(opener, endpoint+'?action=download&version='+'b'*32,
+                                 409, 'archive_updated')
+        self.assert_bridge_error(opener, endpoint, 405, 'read_only', data=b'action=delete')
         with opener.open(endpoint+'?action=download&version='+self.record['version']) as response:
             self.assertEqual(hashlib.sha256(response.read()).hexdigest(), self.record['sha256'])
 
@@ -147,7 +187,7 @@ class LoginBridgeTests(unittest.TestCase):
             output = Path(tmp)
             config = Config(self.url+'/', 'employee', output, mail=False, pdf=False,
                             allow_http=True, headless=True, timeout_ms=5000,
-                            browser_executable=shutil.which('chromium'))
+                            browser_executable=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium'))
             logs = []
             result = DBCollector(config, logs.append).run(PASSWORD)
             self.assertEqual(result.name, 'segio-employee')
@@ -212,7 +252,7 @@ class PublicationTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(zipped.read_bytes()).hexdigest(), record['sha256'])
             endpoint = cell/'folder/html/segio/archive/bridge.php'
             self.assertEqual(endpoint.parent.stat().st_mode & 0o777, 0o755)
-            self.assertNotIn('__PRIVATE_ROOT__', endpoint.read_text())
+            self.assertNotIn('__PRIVATE_ROOT__', endpoint.read_text(encoding='utf-8'))
             for path in private.rglob('*'):
                 if path.is_file():
                     self.assertNotIn(secret, path.read_bytes())

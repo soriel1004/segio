@@ -84,3 +84,13 @@ Windows 기본 모드에 `서버 DB 보관본 받기`를 추가했습니다. 직
 `tests/test_db_client.py`는 다른 사용자 보관본, ZIP 경로 이탈·Windows 특수 경로·심볼릭 링크·검증 목록 밖 파일·해시 불일치를 거부하고, 취소·전송 오류 때 임시 파일이 남지 않는지 검사했습니다. 짧은 폴더/ZIP 이름 충돌 시 기존 파일을 유지하는 것도 확인했습니다. 서버 준비 도구 시험은 POSIX 권한 API와 DB 추출을 모의 처리하여 게시 파일 권한·해시·DB 설정 비노출을 검사했습니다. 실제 root 소유권 변경이나 운영 DB 준비 작업을 실행한 시험은 아닙니다.
 
 실행 명령은 `SEGIO_TEST_PHP=<PHP실행파일> python -m unittest discover -s tests -v`입니다. 전체 37개 중 36개가 통과했고 실제 Windows GUI 시험 1개는 Linux에서 건너뛰었습니다. PHP가 없는 환경에서는 PHP 통합 시험 4개도 건너뜁니다. Python 서버 스크립트는 Python 2 계열 문법 파싱을 통과했고 연결 PHP는 현대 PHP 문법 검사를 통과했으며, Python 2.6/PHP 5.3 구문과 API로 작성했습니다. 실제 구버전 런타임이나 SEGIO의 네이티브 인증 전달은 운영 설치 후 확인이 필요합니다. Windows 패키지에는 서버 도구와 설치 안내도 포함하며 실제 Windows 빌드·GUI 결과는 별도입니다.
+
+## GitHub Actions 시험 환경 수정
+
+공개 Actions 페이지에서 과거 실행 8회가 모두 `Install and test` 단계에서 실패한 것을 확인했습니다. 로그인 없이 상세 로그를 읽을 수 없어 과거 8회 각각의 예외 원인은 확정하지 않았습니다. 사용자 보고의 `HTTPError not raised`는 수정 전 시험에 전역 `urlopen` Mock(200 응답)을 주입하여 재현했습니다. 또한 수정 전 웹 수집 시험의 기본 텍스트 인코딩을 Windows CP1252로 모의하자 UTF-8 한글 manifest를 읽는 단계에서 `UnicodeDecodeError`가 재현됐습니다.
+
+PHP 통합 시험은 전역 `urlopen`과 독립된 로컬 opener를 사용하고 시스템 프록시를 제외합니다. 실제 서버의 HTTPError·상태 코드·프로토콜·JSON 오류 코드를 검사하며 200 오류 응답을 성공으로 취급하지 않습니다. 전역 Mock과 잘못된 프록시를 함께 주입해도 실제 PHP의 401을 확인하는 회귀 시험을 추가했습니다. 고유 준비 응답으로 서버 시작을 확인하고 실패 시에도 프로세스와 임시 디렉터리를 정리합니다. Windows PHP 경로와 파일 인코딩도 명시합니다.
+
+웹 보관 시험의 UTF-8 읽기를 명시하고, CI에서는 설치된 Playwright Chromium 경로를 지정해 Edge 버전·브라우저 정책 차이를 제외합니다. Actions는 Python 3.12·PHP 8.4를 사용해 Linux·Windows에서 각각 시험하고, 모두 통과한 뒤 Windows 패키지를 만듭니다. Node 24 지원 Actions로 갱신했으며 서버 도구 변경도 검증 대상입니다. `run_ci_tests.py`는 실패 시 종료 코드 1을 유지하고 시험 결과·오류를 job Summary에 기록합니다.
+
+수정 후 Linux/PHP 8.4 전체 38개 중 37개가 통과했고 Windows GUI 1개는 건너뛰었습니다. 전역 Mock·프록시 격리 시험과 실제 브라우저 다운로드도 포함합니다. 워크플로는 actionlint 1.7.7 검사를 통과했습니다. 이 로컬 결과를 실제 Windows Actions 실행 결과와 동일하다고 주장하지 않습니다.

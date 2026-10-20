@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -50,9 +51,9 @@ class BrowserIntegrationTests(unittest.TestCase):
         cls.logs = []
         cls.config = Config(cls.server.url + "/icons/app/cms/?html=/home/login.html&shell=/index.shell:483", "alice", Path(cls.temp.name),
                             headless=True, allow_http=True, timeout_ms=5000,
-                            browser_executable=shutil.which("chromium"))
+                            browser_executable=os.environ.get("SEGIO_TEST_BROWSER") or shutil.which("chromium"))
         cls.path = Collector(cls.config, cls.logs.append).run(PASSWORD)
-        cls.manifest = json.loads((cls.path / "manifest.json").read_text())
+        cls.manifest = json.loads((cls.path / "manifest.json").read_text(encoding="utf-8"))
 
     @classmethod
     def tearDownClass(cls):
@@ -71,7 +72,7 @@ class BrowserIntegrationTests(unittest.TestCase):
             for _, document, pdf in rows:
                 self.assertTrue(pdf)
                 self.assertTrue((self.path / pdf).read_bytes().startswith(b"%PDF-"))
-                body = (self.path / document).read_text()
+                body = (self.path / document).read_text(encoding="utf-8")
                 self.assertIn("결재자 홍길동", body)
                 self.assertIn("data:image/png;base64,", body)
                 self.assertNotIn("<script", body)
@@ -105,7 +106,7 @@ class BrowserIntegrationTests(unittest.TestCase):
         viewer = Viewer(self.path)
         try:
           with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, executable_path=shutil.which("chromium"))
+            browser = p.chromium.launch(headless=True, executable_path=os.environ.get("SEGIO_TEST_BROWSER") or shutil.which("chromium"))
             context = browser.new_context()
             # The archive viewer is local; every non-local request is aborted.
             context.route("**/*", lambda r: r.continue_() if r.request.url.startswith(viewer.url.rsplit('/',1)[0] + '/') else r.abort())
@@ -127,9 +128,9 @@ class BrowserIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Config(self.server.url, "alice", Path(tmp), approvals=True, mail=False,
                          headless=True, allow_http=True, pdf=False, timeout_ms=5000,
-                         browser_executable=shutil.which("chromium"))
+                         browser_executable=os.environ.get("SEGIO_TEST_BROWSER") or shutil.which("chromium"))
             path = Collector(cfg).run("wrong")
-            manifest = json.loads((path / "manifest.json").read_text())
+            manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["state"], "failed")
             self.assertEqual(manifest["counts"], {})
 
@@ -139,9 +140,9 @@ class BrowserIntegrationTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 cfg = Config(self.server.url, "alice", Path(tmp), mail=False, pdf=False,
                              headless=True, allow_http=True, timeout_ms=5000,
-                             browser_executable=shutil.which("chromium"))
+                             browser_executable=os.environ.get("SEGIO_TEST_BROWSER") or shutil.which("chromium"))
                 path = Collector(cfg).run(PASSWORD)
-                manifest = json.loads((path / "manifest.json").read_text())
+                manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
                 self.assertEqual(manifest["state"], "collected_with_warnings")
                 self.assertTrue(any("첨부파일 다운로드 실패" in w for w in manifest["warnings"]))
                 self.assertFalse(list(path.rglob("attachments/*")))
@@ -152,9 +153,9 @@ class BrowserIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Config(self.server.url, "alice", Path(tmp), mail=False, pdf=False,
                          headless=True, allow_http=True, max_pages=1, timeout_ms=5000,
-                         browser_executable=shutil.which("chromium"))
+                         browser_executable=os.environ.get("SEGIO_TEST_BROWSER") or shutil.which("chromium"))
             path = Collector(cfg).run(PASSWORD)
-            manifest = json.loads((path / "manifest.json").read_text())
+            manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
             completed = next(c for c in manifest["coverage"] if c.get("folder") == "완료함")
             self.assertEqual(completed["expected"], 2)
             self.assertEqual(completed["discovered"], 1)
@@ -165,10 +166,10 @@ class BrowserIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = Config(self.server.url, "alice", Path(tmp), mail=False, pdf=False,
                          headless=True, allow_http=True,
-                         browser_executable=shutil.which("chromium"))
+                         browser_executable=os.environ.get("SEGIO_TEST_BROWSER") or shutil.which("chromium"))
             cfg.cancel.set()
             path = Collector(cfg).run(PASSWORD)
-            manifest = json.loads((path / "manifest.json").read_text())
+            manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["state"], "cancelled")
             self.assertTrue((path / "index.html").is_file())
 

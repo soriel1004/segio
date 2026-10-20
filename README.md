@@ -122,7 +122,7 @@ Windows에서 Python 3.12와 PowerShell로 실행합니다.
 
 PyInstaller로 Chromium을 포함한 `dist/SEGIOArchive-Windows.zip`을 만듭니다. ZIP을 풀어 **폴더 전체를 유지**하고 `SEGIOArchive.exe`를 실행합니다. EXE 하나만 복사하지 마세요. 실행 파일 코드 서명과 Windows 실제 배포 시험은 별도입니다. 현재 Linux 작업 환경에서는 Windows EXE를 빌드·실행하지 않았습니다.
 
-GitHub에 코드를 반영한 경우 `.github/workflows/windows.yml`의 **Windows package** 작업으로 Windows 통합 시험·패키징을 수행할 수 있습니다. 이 작업에서 원격 업로드나 워크플로 실행은 하지 않았습니다.
+GitHub에 코드를 반영하면 `.github/workflows/windows.yml`의 **Windows package** 작업이 Linux·Windows에서 합성 자료 통합 시험을 수행합니다. 양쪽 시험이 모두 통과하면 Windows EXE를 빌드하고 `SEGIOArchive-Windows` 아티팩트를 제공합니다. 시험은 준비된 PHP 8.4와 Playwright Chromium을 사용하며, 결과 건수·실패한 시험 이름·오류 내용은 Actions 실행의 Summary에도 표시합니다.
 
 ## 개발·시험
 
