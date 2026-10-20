@@ -54,7 +54,7 @@ koro → /home/segio/cell000/home/k/koro/mbox
 
 ## Windows에서 가져오기
 
-1. 최신 실행 ZIP을 새 폴더에 풀고 `SEGIOArchive.exe`를 실행합니다. 소스 ZIP은 Python 3.12 64비트 설치 후 `run_windows.bat`을 실행합니다.
+1. **[Windows v0.3.1 실행 ZIP](https://github.com/soriel1004/segio/actions/runs/39387100611/artifacts/12247444521)**을 GitHub 로그인 후 받습니다. 404 화면이면 GitHub 로그인 후 링크를 다시 엽니다. 새 폴더에 압축을 모두 풀고, 안에 ZIP이 또 있으면 그것도 푼 뒤 `SEGIOArchive.exe`를 실행합니다. 창 제목의 `v0.3.1`을 확인합니다. 소스 ZIP은 Python 3.12 64비트 설치 후 `run_windows.bat`을 실행합니다.
 2. 방식은 **DB·MBOX 바로 가져오기**로 둡니다. **결재 문서**, **메일**은 기본으로 둘 다 선택되며 하나만 가져올 수도 있습니다.
 3. 기존 SEGIO 로그인 주소, 직원 ID(예: `koro`), 그 직원의 SEGIO 암호, 저장 폴더를 입력합니다. DB 암호나 서버 관리자 암호는 입력하지 않습니다.
 4. 기존 HTTP 주소를 사용할 경우 **암호화되지 않은 HTTP 연결 허용**을 선택합니다. HTTPS에서는 인증서 검증을 유지합니다.
