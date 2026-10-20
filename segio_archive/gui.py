@@ -28,6 +28,7 @@ class App(tk.Tk):
         self.events = queue.Queue()
         self.cancel_event = threading.Event()
         self.running = False
+        self.local_conversion = False
         self.last_archive = None
         self.viewer = None
         self.server = tk.StringVar(value=DEFAULT_SERVER)
@@ -119,6 +120,7 @@ class App(tk.Tk):
         self.stop_button.pack(side="left", padx=8)
         ttk.Button(actions, text="보관함 열기", command=self.open_archive).pack(side="left", padx=8)
         ttk.Button(actions, text="파일 무결성 검증", command=self.verify).pack(side="left")
+        ttk.Button(actions, text="기존 백업 갱신", command=self.open_archive).pack(side="left", padx=8)
         ttk.Label(panel, textvariable=self.status, wraplength=770).pack(anchor="w", pady=(14, 6))
         self.progress = ttk.Progressbar(panel, mode="indeterminate")
         self.progress.pack(fill="x", pady=(0, 8))
@@ -164,6 +166,7 @@ class App(tk.Tk):
     def start(self):
         if self.running:
             return
+        self.local_conversion = False
         if not self.approvals.get() and not self.mail.get():
             return messagebox.showerror("선택 필요", "결재 문서 또는 메일을 선택하세요.")
         self.cancel_event = threading.Event()
@@ -236,13 +239,20 @@ class App(tk.Tk):
                             f'서버: {host}\n종류: {algorithm}\n지문: {fingerprint}\n\n서버 관리자에게 확인한 지문과 일치하면 저장하고 연결합니다. 계속할까요?',parent=self)
                     finally:
                         ready.set()
-                elif event in {"done", "error"}:
+                elif event in {"done", "error", "archive_ready", "archive_error"}:
                     self.running = False
                     self.progress.stop()
                     self.start_button.config(state="normal")
                     self.stop_button.config(state="disabled")
                     self.method_box.config(state='readonly')
-                    if event == "done":
+                    if event == 'archive_ready':
+                        self.last_archive=value
+                        self.status.set('메일 바로보기 준비 완료 · 이제 프로그램을 종료해도 index.html에서 열람할 수 있습니다.')
+                        webbrowser.open((value/'index.html').as_uri())
+                    elif event == 'archive_error':
+                        self.status.set(value)
+                        messagebox.showerror('백업 갱신 확인',value)
+                    elif event == "done":
                         self.last_archive = value
                         manifest = json.loads((value / "manifest.json").read_text(encoding="utf-8"))
                         self.status.set(f"{STATES.get(manifest['state'], manifest['state'])} · {value}")
@@ -260,6 +270,9 @@ class App(tk.Tk):
 
     def stop(self):
         self.cancel_event.set()
+        if self.local_conversion:
+            self.status.set('메일 변환을 중단합니다. 완료한 메일은 다음 갱신에서 재사용합니다.')
+            return
         self.status.set('현재 전송을 중단합니다. SSH 임시 자료는 다음 실행의 이어받기를 위해 보존합니다.' if self.method.get()==SSH_MODE else "현재 요청이 끝나면 중단합니다. 검증 전 임시 다운로드 파일은 제거합니다.")
 
     def select_archive(self):
@@ -268,11 +281,25 @@ class App(tk.Tk):
         return Path(value) if value else None
 
     def open_archive(self):
+        if self.running:
+            return
         path = self.select_archive()
         if path:
             if (path / "index.html").is_file():
                 from .viewer import Viewer
                 try:
+                    manifest=json.loads((path/'manifest.json').read_text(encoding='utf-8'))
+                    if manifest.get('viewer')=='sqlite-mail/1':
+                        self.local_conversion=True
+                        self.running=True
+                        self.cancel_event=threading.Event()
+                        self.start_button.config(state='disabled')
+                        self.stop_button.config(state='normal')
+                        self.method_box.config(state='disabled')
+                        self.progress.start()
+                        self.status.set('기존 백업의 메일 본문·첨부를 바로보기 파일로 변환합니다. 서버 접속 없이 진행합니다.')
+                        threading.Thread(target=self.archive_worker,args=(path,),daemon=True).start()
+                        return
                     self.status.set('보관함 목록·검색 화면을 준비합니다. 서버에서 자료를 다시 받지 않습니다.')
                     self.update_idletasks()
                     viewer = Viewer(path)
@@ -286,6 +313,20 @@ class App(tk.Tk):
                     messagebox.showerror('보관함 확인', str(exc))
             else:
                 messagebox.showerror("보관함 확인", "선택한 폴더에 index.html이 없습니다.")
+
+    def archive_worker(self,path):
+        from .portable_mail import prepare_archive
+        from .web import Cancelled
+        def checkpoint():
+            if self.cancel_event.is_set():
+                raise Cancelled('메일 변환을 중단했습니다. 기존 백업 갱신을 다시 누르면 완료한 메일을 재사용합니다.')
+        try:
+            prepare_archive(path,checkpoint,lambda message:self.events.put(('log',message)))
+            self.events.put(('archive_ready',path))
+        except Cancelled as exc:
+            self.events.put(('archive_error',str(exc)))
+        except Exception as exc:
+            self.events.put(('archive_error','메일 바로보기 변환에 실패했습니다. 저장 공간과 파일 무결성을 확인하세요. ['+type(exc).__name__+']'))
 
     def verify(self):
         path = self.select_archive()

@@ -105,7 +105,8 @@ class Viewer:
                 else:
                     script = " script-src 'self' 'unsafe-inline';" if target == owner.folder / "index.html" else ""
                     connect = " connect-src 'self';" if owner.compact and target == owner.folder/'index.html' else ''
-                    self.send_header("Content-Security-Policy", "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none';" + script + connect)
+                    images="img-src 'self' data:;" if relative.parts[:2]==('mail','offline') else 'img-src data:;'
+                    self.send_header("Content-Security-Policy", "default-src 'none'; "+images+" style-src 'unsafe-inline'; base-uri 'none'; form-action 'none';" + script + connect)
                 self.end_headers()
                 if not head:
                     try:

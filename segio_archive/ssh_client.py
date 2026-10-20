@@ -301,7 +301,7 @@ class SSHCollector:
             self.phase='서버 원본 변경 검사'
             self.execute('verify')
             self.phase='Windows 검색 색인 생성'
-            self.log('Windows에 메일 제목 검색 DB를 만드는 중 · 본문과 첨부는 중복 저장하지 않습니다')
+            self.log('메일 검색 DB와 바로보기 HTML·첨부를 만드는 중 · 추가 저장 공간이 필요합니다')
             build_compact_catalog(contents,self.config.username,self.checkpoint,self.log)
             archive=None
             if self.config.make_zip:

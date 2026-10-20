@@ -49,7 +49,14 @@ def main():
     verify.add_argument("folder", type=Path)
     view = sub.add_parser("view", help="서버 연결 없이 로컬 보관함 열기")
     view.add_argument("folder", type=Path)
+    prepare=sub.add_parser('prepare-offline',help='기존 SSH 백업의 메일 본문·첨부를 index.html 바로보기로 변환')
+    prepare.add_argument('folder',type=Path)
     args = parser.parse_args()
+    if args.command=='prepare-offline':
+        from .portable_mail import prepare_archive
+        prepare_archive(args.folder,log=print)
+        print('변환 완료: '+str(args.folder/'index.html'))
+        return 0
     if args.command == 'collect-ssh':
         from .ssh_client import SSHCollector,SSHConfig
         from .web import CollectionError

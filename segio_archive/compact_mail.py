@@ -1,4 +1,4 @@
-"""Disk-backed mail title index; original MBOX bodies are opened on demand."""
+"""Disk-backed mail title index and portable mail pages from original MBOX."""
 from __future__ import annotations
 from contextlib import closing
 from email import policy
@@ -135,6 +135,8 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
     if issue_count:
         manifest['warnings'].append(f'인식하지 못한 메일 원본 파일 {issue_count}개는 원본 그대로 보존했습니다.')
     files['catalog.sqlite3'] = digest_file(database, checkpoint)
+    from .portable_mail import build_portable_mail
+    manifest=build_portable_mail(root,manifest,checkpoint,log)
     from .search_page import install_search_page
     return install_search_page(root, manifest, checkpoint)
 
@@ -151,7 +153,12 @@ def search(root: Path, query='', kind='', page=0):
         total = db.execute('SELECT count(*) FROM items WHERE '+where, parameters).fetchone()[0]
         rows = db.execute('SELECT id,kind,title,folders,html FROM items WHERE '+where+
                           ' ORDER BY rowid LIMIT 100 OFFSET ?', parameters+[max(0,min(page,1000000))*100]).fetchall()
-    return {'total':total, 'items':[dict(zip(('id','kind','title','folder','html'), row)) for row in rows]}
+    items=[dict(zip(('id','kind','title','folder','html'), row)) for row in rows]
+    from .portable_mail import page_path
+    for item in items:
+        if item['kind']=='mail' and (root/page_path(item['id'])).is_file():
+            item['html']=page_path(item['id'])
+    return {'total':total,'items':items}
 
 
 def mail_record(root: Path, identity: str):

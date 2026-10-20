@@ -70,11 +70,15 @@ class SSHArchiveTests(unittest.TestCase):
                 status,_,page=get(item['html'])
                 self.assertEqual(status,200)
                 self.assertIn('원본 첨부 보존 시험',page.decode())
-                status,disposition,attachment=get(item['html']+'/attachment/2')
+                self.assertTrue(item['html'].endswith('/index.html'))
+                from bs4 import BeautifulSoup
+                from urllib.parse import urljoin
+                attachment_url=BeautifulSoup(page,'html.parser').select_one('a[download]')['href']
+                status,disposition,attachment=get(urljoin(item['html'],attachment_url))
                 self.assertEqual(status,200)
                 self.assertEqual(attachment,b'SYNTHETIC_ATTACHMENT')
                 self.assertTrue(disposition.startswith('attachment;'))
-                status,_,eml=get(item['html']+'/original.eml')
+                status,_,eml=get('mail/'+item['id']+'/original.eml')
                 self.assertEqual(status,200)
                 self.assertIn(b'Content-Type: multipart/mixed',eml)
             finally:
