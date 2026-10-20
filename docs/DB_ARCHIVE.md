@@ -30,9 +30,11 @@ python ./tools/export_approval_db.py --user USER_ID --output /backup
 성공하면 두 경로가 출력됩니다.
 
 ```text
-Saved archive ZIP: .../segio-db-USER_ID-임의값.zip
+Saved archive ZIP: .../segio-USER_ID.zip
 Saved summary: .../segio-db-USER_ID-임의값/export-summary.txt
 ```
+
+ZIP 파일명에는 임의 영문·숫자를 붙이지 않습니다. 같은 이름의 파일이 있으면 `segio-USER_ID-2.zip`, `segio-USER_ID-3.zip`처럼 번호를 붙여 기존 백업을 보존합니다.
 
 ZIP을 Windows로 옮겨 압축을 풀고 **`index.html`**을 Edge나 Chrome에서 엽니다. 검색해서 본문·결재선·첨부를 열 수 있습니다. 브라우저 인쇄에서 PDF로 저장할 수 있습니다. HTML 보관함을 사용하는 데 Python·Playwright·전용 Chromium 다운로드는 필요하지 않습니다. 사내 브라우저 정책이 로컬 HTML 열기를 막으면 기존 프로그램의 **보관함 열기**에서 압축을 푼 폴더를 선택할 수 있습니다.
 

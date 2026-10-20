@@ -11,6 +11,7 @@ import base64
 import binascii
 import csv
 import datetime
+import errno
 import hashlib
 import io
 import json
@@ -510,6 +511,22 @@ def render_bundle(bundle, rows, counts):
     return index
 
 
+def reserve_archive_path(output, username):
+    number = 1
+    while True:
+        suffix = "" if number == 1 else "-%d" % number
+        path = os.path.join(os.path.abspath(output), "segio-%s%s.zip" % (username, suffix))
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError as error:
+            if error.errno != errno.EEXIST:
+                raise
+            number += 1
+            continue
+        os.close(descriptor)
+        return path
+
+
 def run_export(config, username, output, cell=None, binary="/usr/bin/psql", progress=None):
     notify = progress or (lambda message: None)
     if not re.match(r"^[A-Za-z0-9_.@-]{1,100}$", username):
@@ -521,7 +538,7 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
     folder = tempfile.mkdtemp(prefix="segio-db-" + username + "-", dir=os.path.abspath(output))
     work = os.path.join(folder, "private-query")
     os.mkdir(work, 0o700)
-    archive_path = folder + ".zip"
+    archive_path = None
     success = False
     try:
         notify("Reading approval records in one read-only DB snapshot...")
@@ -569,6 +586,7 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
         with open(os.path.join(folder, "manifest.json"), "wb") as stream:
             stream.write(json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
         notify("Creating ZIP archive...")
+        archive_path = reserve_archive_path(output, username)
         archive = zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED, allowZip64=True)
         try:
             for root, dirs, files in os.walk(folder):
@@ -582,7 +600,7 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
     finally:
         if not success:
             shutil.rmtree(folder)
-            if os.path.exists(archive_path):
+            if archive_path and os.path.exists(archive_path):
                 os.unlink(archive_path)
         os.umask(old_umask)
 
