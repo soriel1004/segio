@@ -34,6 +34,26 @@ ps -u postgres -o args= | awk '$1=="postgres:" && $3=="cell_000" {print "db_user
 
 프로세스 이름·활성 연결 조건에 의존하는 명령 대신 `tools/diagnose_postgres_local.sh`로 메타데이터와 명령 오류를 한 번에 모읍니다. 이 파일을 서버에 복사한 뒤 root에서 실행합니다.
 
+#### 다운로드한 파일에 `<!DOCTYPE html>`이 나오는 경우
+
+`command not found`, `syntax error near unexpected token newline`, `<!DOCTYPE html>`이 나오면 실행 파일에 웹페이지 HTML이 들어 있는 것입니다. GitHub 화면을 ‘다른 이름으로 저장’하는 방식 대신 [프로젝트 ZIP](https://github.com/soriel1004/segio/archive/refs/heads/main.zip)을 Windows에서 내려받아 압축을 풀고, 그 안의 `tools/diagnose_postgres_local.sh` 원본 파일을 서버로 복사하세요. 기존 파일은 `.html` 등 다른 이름으로 보존한 뒤 새 원본 파일과 구분할 수 있습니다.
+
+서버에서 첫 줄을 확인합니다.
+
+```bash
+head -n 1 diagnose_postgres_local.sh
+```
+
+정상 파일의 첫 줄은 정확히 `#!/bin/bash`입니다. HTML이나 다른 내용이면 실행하지 말고 ZIP에서 파일을 다시 복사합니다. 구문 검사에 성공했을 때만 Bash로 실행합니다.
+
+```bash
+bash -n diagnose_postgres_local.sh && bash diagnose_postgres_local.sh
+```
+
+참고로 Git 커밋 `f458bfec92a5d7238eac64af3982f9c9895f6978`에 저장된 이 스크립트 원본의 SHA-256은 `2257fd9aedfd1ea08f8fd974f1d15016241aa5290184132bddf830102ca51a7c`입니다. 이 특정 버전 파일은 `sha256sum diagnose_postgres_local.sh`로 대조할 수 있습니다. 파일의 줄바꿈이나 내용을 편집하면 해시가 바뀌므로 ZIP 원본을 그대로 전송하세요.
+
+#### 정상 파일 실행
+
 ```bash
 bash diagnose_postgres_local.sh
 ```
