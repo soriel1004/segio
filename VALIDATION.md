@@ -8,6 +8,8 @@
 
 SSH 모의 서버의 알고리즘을 CentOS 6/OpenSSH 5.3에서 제공하는 `ssh-rsa`, `diffie-hellman-group14-sha1`, `aes128-ctr`, `hmac-sha1`으로 제한한 뒤 SSH 시험 8개가 통과했습니다. 첫 Actions #23에서 Windows 전송 검증 후 시험용 읽기 기록이 누락돼 발견된 경로 구분자 문제는 모의 서버의 경로 정규화로 수정했습니다.
 
+최종 [Actions #24](https://github.com/soriel1004/segio/actions/runs/39398463090) (`6269849`)에서 Linux·Windows 시험과 EXE 빌드가 모두 통과했습니다. Windows v0.4.0 아티팩트 ID `12254435188`, 페이지 표시 373 MB, SHA-256 `79a0f9c824bb9c16d7cec6789e450ead09e10d12578e30e4c9ce21c422f28b0d`입니다. 생성 EXE를 실제 사용자 PC에서 실행하거나 운영 SSH 서버에 연결한 검증은 포함하지 않습니다.
+
 SQLite에 제목·헤더·원본 위치를 한 건씩 기록하고 100건 단위 검색을 제공합니다. 원본을 열 때만 본문·첨부를 해석합니다. 실제 로컬 브라우저에서 한글 제목 검색, 외부 요청 없음, HTTP에서 본문·첨부·원본 EML 다운로드를 확인했습니다. 전체 메일 본문을 목록 JSON·HTML에 복제하지 않고, SFTP 선읽기는 1 MiB 단위·동시 8요청으로 제한해 전체 40GB 파일의 선읽기 목록을 만들지 않습니다.
 
 공식 CPython v2.6.9 소스로 별도 실행 파일을 빌드해 실제 Python 2.6.9에서 helper를 가져오고, 임시 PostgreSQL 16.2에 실제 접속해 SSH용 결재 DB·MBOX 준비와 원본 변경 검사를 통과했습니다. 서버 ZIP이나 MBOX 복사본이 만들어지지 않는 것도 확인했습니다. 이 검사는 Python 2.6 문법 검사만 수행한 것이 아닙니다. PostgreSQL 8.4·실제 CentOS OS·사용자 서버의 SSH 연결·40GB 운영 자료·생성 EXE의 현장 실행은 아직 확인하지 않았습니다.

@@ -6,6 +6,8 @@ Windows에서 **서버 관리자 SSH 계정**으로 접속해 지정 직원의 �
 
 **[SSH 사용 안내](docs/SSH_ARCHIVE.md)** · **[최신 소스 ZIP](https://github.com/soriel1004/segio/archive/refs/heads/main.zip)** · **[Windows 빌드·다운로드](https://github.com/soriel1004/segio/actions)**
 
+**[Windows v0.4.0 직접 다운로드](https://github.com/soriel1004/segio/actions/runs/39398463090/artifacts/12254435188)** (GitHub 로그인 필요). [최종 Actions #24](https://github.com/soriel1004/segio/actions/runs/39398463090)에서 Linux·Windows 시험과 실행 파일 빌드가 통과했습니다.
+
 ## Windows에서 실행
 
 1. GitHub Actions의 최신 **성공한 v0.4.0 이상** 실행에서 `SEGIOArchive-Windows`를 받습니다. GitHub 로그인이 필요합니다. 압축을 모두 풀고 `_internal`, `tools`를 포함한 폴더 전체를 유지합니다.
