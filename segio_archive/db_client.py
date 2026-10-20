@@ -1,4 +1,4 @@
-"""Employee SEGIO login and verified download of an administrator-prepared ZIP.
+"""Employee SEGIO login, live personal DB/MBOX transfer and verified local archive.
 
 The server bridge chooses the archive from native SEGIO identity. This client
 never submits a target ID, DB credentials or commands to that bridge.
@@ -13,6 +13,7 @@ import re
 import shutil
 import stat
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -26,6 +27,8 @@ from .web import Collector, CollectionError, Config
 
 BRIDGE = "/segio/archive/bridge.php"
 PROTOCOL = "segio-login-archive/1"
+LIVE_BRIDGE = "/segio/archive/live.php"
+LIVE_PROTOCOL = "segio-live-archive/1"
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -148,7 +151,7 @@ def publish_local(staging, archive, output, username):
     raise CollectionError("같은 이름의 보관함이 너무 많습니다. 다른 저장 폴더를 선택하세요.")
 
 
-class DBCollector(Collector):
+class PreparedDBCollector(Collector):
     def __init__(self, config: Config, log=lambda _: None):
         super().__init__(config, log)
         if not re.fullmatch(r'[A-Za-z0-9_.@-]{1,100}', config.username) or config.username.lower()=='guest':
@@ -183,6 +186,15 @@ class DBCollector(Collector):
             raise CollectionError("서버의 보관본 검증 정보가 올바르지 않습니다.")
         return record
 
+    def download_endpoint(self, record):
+        return urljoin(self.base, BRIDGE+'?'+urlencode({'action':'download', 'version':record['version']}))
+
+    def finalize_download(self, root, archive, destination):
+        pass
+
+    def cleanup_remote(self):
+        pass
+
     def receive(self, record):
         output = self.config.output.expanduser().resolve()
         output.mkdir(parents=True, exist_ok=True)
@@ -193,7 +205,7 @@ class DBCollector(Collector):
             archive = root/'download.zip'
             destination = root/'contents'
             destination.mkdir(mode=0o700)
-            endpoint = urljoin(self.base, BRIDGE+'?'+urlencode({'action':'download', 'version':record['version']}))
+            endpoint = self.download_endpoint(record)
             opener = download_opener(self.context.cookies([endpoint]))
             user_agent = self.page.evaluate('navigator.userAgent')
             request = urllib.request.Request(endpoint, headers={'Accept':'application/zip', 'User-Agent':user_agent})
@@ -221,6 +233,7 @@ class DBCollector(Collector):
             self.log("ZIP과 내부 파일 검증 중")
             unpack_verified(archive, destination, self.config.username, self.checkpoint)
             self.checkpoint()
+            self.finalize_download(root, archive, destination)
             return publish_local(destination, archive, output, self.config.username)
 
     def run(self, password: str) -> Path:
@@ -247,11 +260,15 @@ class DBCollector(Collector):
                             timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S KST')
                     except (ValueError, KeyError, TypeError):
                         prepared = '확인 필요'
-                    self.log("본인 보관본 확인 · 서버 준비 시각: " + prepared)
+                    self.log("본인 자료 확인 · 추출 기준 시각: " + prepared)
                     result = self.receive(record)
                     self.log("다운로드와 파일 검증 완료: " + str(result))
                     return result
                 finally:
+                    try:
+                        self.cleanup_remote()
+                    except Exception:
+                        self.log('서버 임시 작업 정리를 확인하지 못했습니다. 완성 자료는 서버에서 보존 기간에 따라 정리됩니다.')
                     self.browser.close()
                     self.context = self.page = self.browser = None
         except (CollectionError, BrowserUnavailable):
@@ -261,3 +278,118 @@ class DBCollector(Collector):
             raise CollectionError("로그인·다운로드 처리에 실패했습니다. 서버 연결과 설치 상태를 확인하세요.") from None
         finally:
             password = ''
+
+
+class DBCollector(PreparedDBCollector):
+    """Fresh employee-scoped DB query and original server mailbox transfer."""
+    def __init__(self, config, log=lambda _: None):
+        super().__init__(config, log)
+        self.csrf = None
+        self.job = None
+
+    def live_call(self, action, *, post=False, **fields):
+        query = {'action':action}
+        if action in {'status','download','cleanup'}:
+            query['job'] = self.job
+        url = urljoin(self.base, LIVE_BRIDGE+'?'+urlencode(query))
+        if post:
+            response = self.context.request.post(url, form={'csrf':self.csrf, **fields},
+                                                 timeout=self.config.timeout_ms, max_redirects=0)
+        else:
+            response = self.context.request.get(url, timeout=self.config.timeout_ms, max_redirects=0)
+        try:
+            if response.status==404 and action=='info':
+                raise CollectionError('실시간 DB·MBOX 연결 기능이 없습니다. 서버에서 install_live_archive.py를 한 번 설치해야 합니다.')
+            if 'application/json' not in response.headers.get('content-type',''):
+                raise CollectionError('서버 실시간 추출 기능의 응답을 확인하지 못했습니다.')
+            body = response.body()
+            if len(body)>65536:
+                raise CollectionError('서버 추출 응답이 올바르지 않습니다.')
+            value = json.loads(body)
+            if response.status>=300:
+                code = value.get('error','') if isinstance(value,dict) else ''
+                raise CollectionError(self.error_message(code))
+        finally:
+            response.dispose()
+        if not isinstance(value,dict) or value.get('protocol')!=LIVE_PROTOCOL:
+            raise CollectionError('서버 실시간 추출 기능의 버전이 일치하지 않습니다.')
+        if value.get('username')!=self.config.username:
+            raise CollectionError('실제 로그인 계정이 입력한 ID와 다릅니다. 해당 직원 계정으로 다시 로그인하세요.')
+        return value
+
+    @staticmethod
+    def error_message(code):
+        return {
+            'native_login_required':'SEGIO 직원 로그인을 확인하지 못했습니다. ID·암호와 서버 인증 연결을 확인하세요.',
+            'mail_path_unconfigured':'서버의 직원별 메일 저장 경로가 설정되지 않았습니다.',
+            'mail_path_missing_or_symlink':'해당 직원의 메일 경로가 없거나 안전한 실제 경로가 아닙니다. 서버 설정을 확인하세요.',
+            'mail_changed_retry':'복사 중 서버 메일이 변경되었습니다. 메일이 변경되지 않는 시간에 다시 실행하세요.',
+            'export_already_running':'이 직원의 추출 작업이 이미 진행 중입니다. 완료 후 다시 실행하세요.',
+            'export_busy':'서버에서 다른 추출 작업이 진행 중입니다. 잠시 후 다시 실행하세요.',
+            'export_process_unavailable':'서버 추출 작업기를 시작하지 못했습니다. Python·실행 계정 권한을 확인하세요.',
+            'cancelled':'DB·MBOX 가져오기를 중단했습니다.',
+        }.get(code,'서버에서 실시간 추출을 완료하지 못했습니다. 서버 작업 권한과 DB·메일 경로를 확인하세요.')
+
+    def info(self):
+        info = self.live_call('info')
+        if not re.fullmatch(r'[a-f0-9]{64}',str(info.get('csrf',''))):
+            raise CollectionError('서버의 요청 인증 정보를 확인하지 못했습니다.')
+        if info.get('capabilities',{}).get('live_db') is not True:
+            raise CollectionError('이 서버는 실시간 DB 추출을 지원하지 않습니다.')
+        self.csrf = info['csrf']
+        started = self.live_call('start', post=True, approvals='1' if self.config.approvals else '0',
+                                 mail='1' if self.config.mail else '0')
+        job = started.get('job','')
+        if not re.fullmatch(r'[a-f0-9]{32}',str(job)):
+            raise CollectionError('서버 작업 번호가 올바르지 않습니다.')
+        self.job = job
+        previous = None
+        deadline = time.monotonic()+6*3600
+        while time.monotonic()<deadline:
+            self.checkpoint()
+            status = self.live_call('status')
+            if status.get('job')!=self.job:
+                raise CollectionError('서버 작업 번호가 일치하지 않습니다.')
+            phase = status.get('phase')
+            if phase!=previous:
+                self.log({'queued':'서버 추출 요청 접수', 'database':'로그인한 직원의 DB 자료를 읽는 중',
+                          'mail':'서버 MBOX 원본 전체를 복사하는 중', 'packing':'전송 자료를 압축하는 중',
+                          'ready':'이번 요청의 DB·MBOX 추출 완료'}.get(phase,'서버 추출 작업 확인 중'))
+                previous = phase
+            if status.get('state')=='failed':
+                raise CollectionError(self.error_message(phase))
+            if status.get('state')=='ready':
+                if (type(status.get('bytes')) is not int or status['bytes']<=0 or
+                    not re.fullmatch(r'[a-f0-9]{64}',str(status.get('sha256','')))):
+                    raise CollectionError('추출 파일의 검증 정보가 올바르지 않습니다.')
+                return status
+            self.config.cancel.wait(1)
+        raise CollectionError('서버 추출 대기 시간이 초과되었습니다.')
+
+    def download_endpoint(self, record):
+        return urljoin(self.base, LIVE_BRIDGE+'?'+urlencode({'action':'download','job':self.job}))
+
+    def finalize_download(self, root, archive, destination):
+        from .mail_import import build_local_catalog
+        manifest = json.loads((destination/'manifest.json').read_text(encoding='utf-8'))
+        live = manifest.get('live_export',{})
+        if (live.get('job')!=self.job or live.get('approvals')!=self.config.approvals or
+            live.get('mail')!=self.config.mail):
+            raise CollectionError('이번 요청의 DB·MBOX 선택과 추출 결과가 일치하지 않습니다.')
+        self.log('Windows에 개인 DB와 메일 제목 검색 색인을 만드는 중')
+        build_local_catalog(destination, self.config.username, self.checkpoint)
+        indexed = root/'indexed.zip'
+        with zipfile.ZipFile(indexed,'w',zipfile.ZIP_DEFLATED,allowZip64=True) as zipped:
+            for path in destination.rglob('*'):
+                if not path.is_file():
+                    continue
+                self.checkpoint()
+                with path.open('rb') as incoming, zipped.open(path.relative_to(destination).as_posix(),'w',force_zip64=True) as outgoing:
+                    while block := incoming.read(1024*1024):
+                        self.checkpoint()
+                        outgoing.write(block)
+        os.replace(indexed,archive)
+
+    def cleanup_remote(self):
+        if self.job and self.csrf:
+            self.live_call('cleanup',post=True)

@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 import zipfile
 
-from segio_archive.db_client import DBCollector, PROTOCOL, publish_local, unpack_verified
+from segio_archive.db_client import PreparedDBCollector as DBCollector, PROTOCOL, publish_local, unpack_verified
 from segio_archive.web import Cancelled, CollectionError, Config
 
 

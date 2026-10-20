@@ -21,13 +21,15 @@ def main():
     collect.add_argument("--headless", action="store_true")
     collect.add_argument("--manual-login", action="store_true")
     collect.add_argument("--max-pages", type=int, default=300)
-    db = sub.add_parser("collect-db", help="직원 SEGIO 로그인 후 관리자가 준비한 본인 DB 보관본 받기")
+    db = sub.add_parser("collect-db", help="직원 로그인 후 현재 개인 DB 자료·서버 MBOX 원본 가져오기")
     db.add_argument("--server", required=True)
     db.add_argument("--user", required=True)
     db.add_argument("--output", type=Path, default=Path("archives"))
     db.add_argument("--allow-http", action="store_true")
     db.add_argument("--headless", action="store_true")
     db.add_argument("--manual-login", action="store_true")
+    db.add_argument("--no-mail", action="store_true")
+    db.add_argument("--no-approvals", action="store_true")
     verify = sub.add_parser("verify", help="수집 파일 SHA-256 검사")
     verify.add_argument("folder", type=Path)
     view = sub.add_parser("view", help="서버 연결 없이 로컬 보관함 열기")
@@ -58,7 +60,7 @@ def main():
         try:
             config = Config(server=args.server, username=args.user, output=args.output,
                             allow_http=args.allow_http, approvals=not getattr(args, 'no_approvals', False),
-                            mail=False if args.command=='collect-db' else not args.no_mail,
+                            mail=not args.no_mail,
                             pdf=False if args.command=='collect-db' else not args.no_pdf,
                             headless=args.headless, manual_login=args.manual_login,
                             max_pages=getattr(args, 'max_pages', 300))

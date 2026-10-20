@@ -1,0 +1,138 @@
+<?php
+/* SEGIO on-demand archive bridge, PHP 5.3 compatible; native identity only. */
+ini_set('display_errors', '0');
+header('Cache-Control: no-store, private');
+header('X-Content-Type-Options: nosniff');
+function answer($status, $value) {
+    header('HTTP/1.1 '.$status, true, $status);
+    header('Content-Type: application/json; charset=UTF-8');
+    echo json_encode($value); exit;
+}
+function problem($status, $code) { answer($status, array('protocol'=>'segio-live-archive/1','error'=>$code)); }
+function object_file($path) {
+    if (!is_file($path) || is_link($path) || filesize($path)>65536) return false;
+    return json_decode(file_get_contents($path), true);
+}
+function save_object($path, $value) {
+    $temporary = tempnam(dirname($path), '.update-');
+    if ($temporary===false || file_put_contents($temporary,json_encode($value))===false)
+        problem(503,'job_storage_failed');
+    chmod($temporary,0600);
+    if (DIRECTORY_SEPARATOR==='\\' && file_exists($path)) unlink($path);
+    if (!rename($temporary,$path)) problem(503,'job_storage_failed');
+}
+function same_token($a,$b) {
+    if (!is_string($a) || strlen($a)!==strlen($b)) return false;
+    $difference=0; for($i=0;$i<strlen($a);$i++) $difference |= ord($a[$i]) ^ ord($b[$i]);
+    return $difference===0;
+}
+function remove_job($path) {
+    foreach(scandir($path) as $name) {
+        if ($name==='.' || $name==='..') continue;
+        $file=$path.'/'.$name;
+        if (is_dir($file) && !is_link($file)) remove_job($file); else unlink($file);
+    }
+    rmdir($path);
+}
+if (in_array(strtolower((string)ini_get('register_globals')),array('1','on','yes','true'),true))
+    problem(503,'insecure_php_configuration');
+$a=isset($_ENV['REMOTE_USER'])?$_ENV['REMOTE_USER']:'';
+$b=isset($_SERVER['REMOTE_USER'])?$_SERVER['REMOTE_USER']:'';
+if ($a!=='' && $b!=='' && $a!==$b) problem(401,'identity_conflict');
+$uid=$a!==''?$a:$b;
+if (!is_string($uid) || !preg_match('/\A[A-Za-z0-9_.@-]{1,100}\z/',$uid) ||
+    $uid==='.' || $uid==='..' || strtolower($uid)==='guest') problem(401,'native_login_required');
+if (isset($_ENV['REMOTE_USERLEVEL']) && (string)$_ENV['REMOTE_USERLEVEL']==='0') problem(401,'native_login_required');
+$root='__PRIVATE_ROOT__';
+$config=object_file($root.'/config.json');
+if (!$config || !isset($config['csrf_secret'],$config['worker'],$config['python'])) problem(503,'service_not_configured');
+$method=isset($_SERVER['REQUEST_METHOD'])?$_SERVER['REQUEST_METHOD']:(isset($_ENV['REQUEST_METHOD'])?$_ENV['REQUEST_METHOD']:'');
+$action=isset($_GET['action'])?$_GET['action']:'info';
+if (!is_string($action) || !in_array($action,array('info','start','status','download','cleanup'),true)) problem(400,'unknown_action');
+foreach($_GET as $key=>$value) if ($key!=='action' && $key!=='job') problem(400,'unexpected_parameter');
+$post=($action==='start' || $action==='cleanup');
+if (($post && $method!=='POST') || (!$post && $method!=='GET' && $method!=='HEAD')) problem(405,'read_only');
+$hour=(int)floor(time()/3600);
+$csrf=hash_hmac('sha256',$uid.'|'.$hour,$config['csrf_secret']);
+if ($action==='info') answer(200,array('protocol'=>'segio-live-archive/1','username'=>$uid,
+    'csrf'=>$csrf,'capabilities'=>array('live_db'=>true,'mbox'=>!empty($config['mail_template']))));
+if ($post) {
+    foreach($_POST as $key=>$value) if (!in_array($key,array('csrf','approvals','mail'),true)) problem(400,'unexpected_parameter');
+    $token=isset($_POST['csrf'])?$_POST['csrf']:'';
+    if (!same_token($token,$csrf) && !same_token($token,hash_hmac('sha256',$uid.'|'.($hour-1),$config['csrf_secret'])))
+        problem(403,'csrf_required');
+}
+$jobs=$root.'/jobs';
+if ($action==='start') {
+    $approvals=isset($_POST['approvals']) && $_POST['approvals']==='1';
+    $mail=isset($_POST['mail']) && $_POST['mail']==='1';
+    if (!$approvals && !$mail) problem(400,'empty_selection');
+    if ($mail && empty($config['mail_template'])) problem(503,'mail_path_unconfigured');
+    if (!function_exists('proc_open')) problem(503,'export_process_unavailable');
+    $gate=fopen($jobs.'/.gate','a+');
+    if (!$gate || !flock($gate,LOCK_EX)) problem(503,'job_storage_failed');
+    $active=0;
+    foreach(scandir($jobs) as $id) {
+        if (!preg_match('/\A[a-f0-9]{32}\z/',$id) || is_link($jobs.'/'.$id)) continue;
+        $request=object_file($jobs.'/'.$id.'/request.json');
+        $status=object_file($jobs.'/'.$id.'/status.json');
+        if (!$request) continue;
+        $running=(!$status || $status['state']==='running' || $status['state']==='queued');
+        if (time()-$request['created_at']>86400 && !$running) { remove_job($jobs.'/'.$id); continue; }
+        if ($running) {
+            $active++;
+            if ($request['username']===$uid) problem(409,'export_already_running');
+        }
+    }
+    if ($active>=4) problem(409,'export_busy');
+    $bytes=false;
+    if (function_exists('random_bytes')) $bytes=random_bytes(16);
+    else {
+        $random=@fopen('/dev/urandom','rb');
+        $bytes=$random?fread($random,16):false;
+        if ($random) fclose($random);
+    }
+    if ($bytes===false || strlen($bytes)!==16) {
+        $strong=false;
+        $bytes=function_exists('openssl_random_pseudo_bytes')?openssl_random_pseudo_bytes(16,$strong):false;
+        if (!$strong || $bytes===false) problem(503,'secure_random_unavailable');
+    }
+    $id=bin2hex($bytes); $job=$jobs.'/'.$id;
+    if (!mkdir($job,0700)) problem(503,'job_storage_failed');
+    save_object($job.'/request.json',array('username'=>$uid,'approvals'=>$approvals,'mail'=>$mail,'created_at'=>time()));
+    save_object($job.'/status.json',array('protocol'=>'segio-live-archive/1','username'=>$uid,'job'=>$id,'state'=>'queued','phase'=>'queued'));
+    flock($gate,LOCK_UN); fclose($gate);
+    $command=escapeshellarg($config['python']).' '.escapeshellarg($config['worker']).
+             ' --config '.escapeshellarg($root.'/config.json').' --job '.escapeshellarg($id).' --detach';
+    $null=DIRECTORY_SEPARATOR==='\\'?'NUL':'/dev/null';
+    $pipes=array();
+    $process=proc_open($command,array(0=>array('file',$null,'r'),1=>array('file',$null,'a'),2=>array('file',$null,'a')),$pipes,$root);
+    if (!is_resource($process) || proc_close($process)!==0) {
+        save_object($job.'/status.json',array('protocol'=>'segio-live-archive/1','username'=>$uid,'job'=>$id,'state'=>'failed','phase'=>'export_process_unavailable'));
+        problem(503,'export_process_unavailable');
+    }
+    answer(202,array('protocol'=>'segio-live-archive/1','username'=>$uid,'job'=>$id,'state'=>'queued'));
+}
+$id=isset($_GET['job'])?$_GET['job']:'';
+if (!is_string($id) || !preg_match('/\A[a-f0-9]{32}\z/',$id)) problem(400,'invalid_job');
+$job=$jobs.'/'.$id;
+if (is_link($job)) problem(404,'job_not_found');
+$request=object_file($job.'/request.json');
+if (!$request || $request['username']!==$uid) problem(404,'job_not_found');
+$status=object_file($job.'/status.json');
+if ($action==='status') {
+    if (!$status) problem(503,'job_status_unavailable');
+    answer(200,$status);
+}
+if ($action==='cleanup') {
+    if ($status && ($status['state']==='ready' || $status['state']==='failed')) remove_job($job);
+    else file_put_contents($job.'/cancel','cancel');
+    answer(200,array('protocol'=>'segio-live-archive/1','username'=>$uid,'state'=>'cleaned'));
+}
+if (!$status || $status['state']!=='ready') problem(409,'export_not_ready');
+$file=$job.'/archive.zip';
+if (is_link($file) || !is_file($file) || filesize($file)!=$status['bytes']) problem(503,'archive_unavailable');
+header('Content-Type: application/zip'); header('Content-Length: '.$status['bytes']);
+header('Content-Disposition: attachment; filename="segio-'.$uid.'.zip"');
+if ($method==='HEAD') exit;
+@set_time_limit(0); readfile($file);

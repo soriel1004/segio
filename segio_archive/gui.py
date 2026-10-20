@@ -12,7 +12,7 @@ from .archive import verify_archive, STATES
 from .browser import BrowserUnavailable
 from .web import Collector, CollectionError, Config, DEFAULT_SERVER
 
-DB_MODE = "서버 DB 보관본 받기"
+DB_MODE = "DB·MBOX 바로 가져오기"
 WEB_MODE = "웹 화면 수집 (결재·메일)"
 
 
@@ -32,7 +32,7 @@ class App(tk.Tk):
         self.password = tk.StringVar()
         self.folder = tk.StringVar(value=str(Path.home() / "Documents" / "SEGIO보관함"))
         self.approvals = tk.BooleanVar(value=True)
-        self.mail = tk.BooleanVar(value=False)
+        self.mail = tk.BooleanVar(value=True)
         self.pdf = tk.BooleanVar(value=False)
         self.method = tk.StringVar(value=DB_MODE)
         self.http = tk.BooleanVar(value=False)
@@ -54,7 +54,7 @@ class App(tk.Tk):
                                  values=[DB_MODE, WEB_MODE], state="readonly", width=35)
         method_box.pack(side="left")
         method_box.bind("<<ComboboxSelected>>", self.change_method)
-        ttk.Label(panel, text="DB 방식: 서버 관리자가 해당 직원의 보관본을 먼저 준비해야 합니다.\n직원 SEGIO ID·암호로 로그인하면 본인 보관본을 내려받습니다. 자료 기준은 서버 준비 시각입니다.",
+        ttk.Label(panel, text="직원 SEGIO ID·암호로 로그인하면 현재 DB 자료와 서버 MBOX 원본을 가져옵니다.\nWindows에 저장한 뒤 결재 내용과 메일 제목을 검색할 수 있습니다. 서버 연결 기능은 한 번 설치해야 합니다.",
                   wraplength=800).pack(anchor="w", pady=(0, 8))
         form = ttk.Frame(panel)
         form.pack(fill="x")
@@ -72,12 +72,12 @@ class App(tk.Tk):
         choices.pack(fill="x")
         self.collection_choices = []
         for label, var in [("결재 문서", self.approvals), ("메일", self.mail), ("결재 PDF 생성", self.pdf)]:
-            widget = ttk.Checkbutton(choices, text=label, variable=var, state="disabled")
+            widget = ttk.Checkbutton(choices, text=label, variable=var, state="disabled" if var is self.pdf else "normal")
             widget.pack(side="left", padx=(0, 18))
             self.collection_choices.append(widget)
         ttk.Checkbutton(panel, text="암호화되지 않은 HTTP 연결 허용 (ID·암호와 문서가 전송 중 노출될 수 있음)", variable=self.http).pack(anchor="w", pady=(12, 4))
         ttk.Checkbutton(panel, text="열린 브라우저에서 직접 로그인 (자동 로그인에 실패하는 경우)", variable=self.manual).pack(anchor="w")
-        ttk.Label(panel, text="암호는 파일에 저장하지 않습니다. 메일 열람으로 서버의 읽음 상태가 바뀔 수 있습니다.\n보관 폴더 자체는 암호화되지 않으므로 접근 권한을 관리하세요.", wraplength=770, foreground="#76551b").pack(anchor="w", pady=12)
+        ttk.Label(panel, text="암호는 파일에 저장하지 않습니다.\n보관 폴더 자체는 암호화되지 않으므로 접근 권한을 관리하세요.", wraplength=770, foreground="#76551b").pack(anchor="w", pady=12)
         actions = ttk.Frame(panel)
         actions.pack(fill="x", pady=5)
         self.start_button = ttk.Button(actions, text="로그인하고 수집 시작", command=self.start)
@@ -96,10 +96,10 @@ class App(tk.Tk):
     def change_method(self, event=None):
         is_db = self.method.get() == DB_MODE
         self.approvals.set(True)
-        self.mail.set(not is_db)
+        self.mail.set(True)
         self.pdf.set(not is_db)
-        for widget in self.collection_choices:
-            widget.config(state="disabled" if is_db else "normal")
+        for index, widget in enumerate(self.collection_choices):
+            widget.config(state="disabled" if is_db and index==2 else "normal")
 
     def choose_folder(self):
         value = filedialog.askdirectory(title="백업을 저장할 상위 폴더")
@@ -115,8 +115,8 @@ class App(tk.Tk):
         is_db = self.method.get() == DB_MODE
         try:
             config = Config(server=self.server.get().strip(), username=self.user.get().strip(),
-                            output=Path(self.folder.get()), approvals=True if is_db else self.approvals.get(),
-                            mail=False if is_db else self.mail.get(), pdf=False if is_db else self.pdf.get(), allow_http=self.http.get(),
+                            output=Path(self.folder.get()), approvals=self.approvals.get(),
+                            mail=self.mail.get(), pdf=False if is_db else self.pdf.get(), allow_http=self.http.get(),
                             manual_login=self.manual.get(), cancel=self.cancel_event)
             config.validate()
             if not self.password.get() and not config.manual_login:

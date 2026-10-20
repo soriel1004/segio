@@ -100,3 +100,17 @@ PHP 통합 시험은 전역 `urlopen`과 독립된 로컬 opener를 사용하고
 Linux PHP CLI에도 `-d session.save_path=C:/Users/RUNNER~1/AppData/Local/Temp/fixture/sessions`처럼 Windows 형식 값을 전달하면 구문 경고와 함께 `C:/Users/RUNNER`로 잘리는 것을 재현했습니다. `/`로 시작하는 Linux 절대 경로는 CLI의 인용 처리로 같은 문제가 드러나지 않았습니다. 시험 라우터에서 `session_save_path(__DIR__.'/sessions')`로 직접 지정하여 CLI INI 파싱을 제거했습니다. 모든 PHP 통합 시험은 이제 공백과 `RUNNER~1` 구성 요소가 있는 임시 경로에서 실행하며 시작 확인에도 실제 세션 저장 성공을 요구합니다. 세션 초기화 실패는 경고가 섞인 200 대신 명확한 500으로 표시합니다. 이 변경은 시험 라우터에만 적용하며 운영 SEGIO PHP 설정을 변경하지 않습니다.
 
 수정 커밋 `fb5132b`의 [최종 Actions 실행 #11](https://github.com/soriel1004/segio/actions/runs/39376494089)은 **Success**입니다. `Test (ubuntu-latest)`·`Test (windows-latest)`와 두 시험에 의존하는 `Build Windows package`가 성공했습니다. 이는 Windows GUI 시작, 실제 PHP 통합 시험과 브라우저 수집·다운로드를 포함합니다. `SEGIOArchive-Windows` 아티팩트 1개(페이지 표시 368 MB)가 게시됐으며 SHA-256은 `af8c4f7bc429b8d1e82cb2a88ff94aecedcf29e794e0819d96abe71ed5cb0233`입니다. 업로드 액션의 Node 20 강제 전환 경고와 Ubuntu 이미지 변경 안내는 비차단 메시지로 남아 있습니다. EXE 파일을 현장에서 실행하거나 실제 운영 SEGIO 계정으로 접속한 검증은 아닙니다.
+
+## v0.3.0 요청 시 DB 조회·MBOX 전체 전송·Windows 메일 제목 검색
+
+Windows 기본 모드를 `DB·MBOX 바로 가져오기`로 변경했습니다. 직원 SEGIO 로그인 뒤 서버가 확인한 동일 ID로 매번 새 작업을 시작합니다. 고정된 직원별 사전 ZIP은 사용하지 않습니다. 기존 `cell_000` 접속 설정으로 읽기 전용 DB 조회를 수행하고, 사용자가 알려준 `/home/segio/cell000/home/k/koro/mbox`를 반영한 `home/{initial}/{user}/mbox` 규칙으로 본인 MBOX 폴더의 모든 일반 파일을 복사합니다. Windows에서 검증 후 결재·메일용 SQLite/HTML 검색 색인을 생성합니다.
+
+`test_live_archive.py`는 실제 PHP 연결 코드와 네이티브 인증 모의 라우터, 분리 실행하는 실제 작업기, Playwright 로그인·스트리밍 다운로드를 함께 실행합니다. 테스트용 DB 어댑터를 제외한 전송 경로는 실제 코드입니다. 두 번 요청하는 사이 합성 DB를 변경하여 두 번째 결과가 새 자료인지 확인했고 본인 작업 정리·짧은 이름 충돌 처리·한글 제목의 오프라인 검색을 검증했습니다. 다른 계정의 DB/메일은 포함되지 않으며 다른 계정의 작업 조회·다운로드와 CSRF 없는 시작 요청을 거부합니다.
+
+합성 MBOX 세 통, MIME 첨부, 개별 RFC822 메일, 고유 형식의 이진 색인 파일을 사용했습니다. UTF-8/EUC-KR 인코딩 제목, 인코딩 선언 없는 CP949 제목, 첨부 파일명 경로 이탈 방지, 외부 이미지·스크립트 제거, 원본 MBOX/EML/미인식 파일의 바이트 동일성과 SHA-256을 확인했습니다. 메일 복사 도중 원본이 변경되면 완료로 처리하지 않으며 메일만 선택했을 때 DB 조회를 호출하지 않습니다. 설치 시험은 POSIX 권한·계정 API를 모의하여 직원별 ZIP이 생성되지 않고 DB 암호가 복사되지 않는지 검사했습니다.
+
+선정 범위는 로그인 ID의 기안·결재선·대결·참조·자동회람·개인 수신과 관련 이력입니다. 댓글·즐겨찾기·내부 저장만으로 선정되는 문서는 제외합니다. 관리자가 설치하여 승인하는 보관 정책이며 원래 인코딩 PHP의 화면별 ACL과 동일한 판정으로 검증한 상태는 아닙니다.
+
+임시 PostgreSQL 16.2에서도 실제 `live_export_worker.py`와 기존 DB 추출기를 연결했습니다. 관리자 모드의 현재 14개·과거 2개 중 직원 모드에서 허용되는 현재 9개·과거 2개를 추출하고, Windows용 SQLite의 검색 행과 원본 기록 11개를 확인했습니다. DB 행 수·DB 설정·인증 설정은 유지됐고 비밀값이 보관 자료에 포함되지 않았습니다. 이전 본문·Base64 서명·첨부·HTML 격리 검사도 통과했습니다.
+
+로컬 전체 시험은 **45개 중 44개 통과, Windows GUI 1개 건너뜀**입니다. PHP 8.4 문법 검사, Python 2 문법 파싱(`print_function`), actionlint도 통과했습니다. 서버 코드는 Python 2.6/PHP 5.3 호환 API로 작성했지만 실제 CentOS 6 구버전 런타임·운영 네이티브 인증·메일 고유 형식과 제목 해독은 현장 확인이 필요합니다. 미인식 파일도 원본은 보존하며 색인 경고를 남깁니다. 32 MiB 초과 개별 메일은 제목·헤더를 색인하고 전체 원본은 보존합니다.

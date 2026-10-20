@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 
 from segio_archive.archive import verify_archive
-from segio_archive.db_client import DBCollector, unpack_verified
+from segio_archive.db_client import PreparedDBCollector as DBCollector, unpack_verified
 from segio_archive.web import CollectionError, Config, canonical
 from test_db_client import make_archive
 
@@ -73,8 +73,7 @@ def local_opener(jar=None):
     return urllib.request.build_opener(*handlers)
 
 
-@unittest.skipUnless(PHP, 'Optional PHP CLI needed: set SEGIO_TEST_PHP')
-class LoginBridgeTests(unittest.TestCase):
+class NativePHPFixture:
     @classmethod
     def setUpClass(cls):
         # Exercise the INI-special ~ and spaces on every OS, not only Windows
@@ -158,6 +157,9 @@ class LoginBridgeTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
         return opener
 
+
+@unittest.skipUnless(PHP, 'Optional PHP CLI needed: set SEGIO_TEST_PHP')
+class LoginBridgeTests(NativePHPFixture, unittest.TestCase):
     def test_no_native_identity_rejects_spoofed_user_headers_and_query_ids(self):
         request = urllib.request.Request(self.url+'/segio/archive/bridge.php?action=info&uid=employee',
                                          headers={'Remote-User':'employee', 'X-Remote-User':'employee',
@@ -224,7 +226,7 @@ class LoginBridgeTests(unittest.TestCase):
                 collector.page.locator('[name=password]').fill(PASSWORD)
                 collector.login_actions.add(canonical(self.url+'/login'))
                 collector.page.locator('button').click()
-            with patch('segio_archive.db_client.DBCollector.login', different_login):
+            with patch('segio_archive.db_client.PreparedDBCollector.login', different_login):
                 with self.assertRaisesRegex(CollectionError, '실제 로그인 계정'):
                     client.run('unused')
             self.assertFalse(other_output.exists())

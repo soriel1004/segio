@@ -144,8 +144,12 @@ def verify_archive(root: Path) -> dict:
         if not p.is_relative_to(root.resolve()) or not p.is_file():
             errors.append({"file": name, "reason": "missing_or_unsafe"})
         else:
-            data = p.read_bytes()
-            if len(data) != expected["bytes"] or hashlib.sha256(data).hexdigest() != expected["sha256"]:
+            digest, count = hashlib.sha256(), 0
+            with p.open('rb') as stream:
+                while block := stream.read(1024*1024):
+                    digest.update(block)
+                    count += len(block)
+            if count != expected["bytes"] or digest.hexdigest() != expected["sha256"]:
                 errors.append({"file": name, "reason": "checksum_mismatch"})
     return {"ok": not errors, "checked": len(manifest["files"]), "errors": errors,
             "account_deletion_verified": False}
@@ -181,7 +185,7 @@ function render(){const q=$('q').value.toLocaleLowerCase();const kind=$('kind').
 const found=data.items.filter(i=>(!kind||i.kind===kind)&&[i.title,i.body,...i.folders].join(' ').toLocaleLowerCase().includes(q));$('list').replaceChildren();
 $('summary').textContent=found.length+'개 중 '+Math.min(shown,found.length)+'개 표시';
 for(const i of found.slice(0,shown)){const d=document.createElement('article');d.className='card';const h=document.createElement('h2');h.textContent=i.title;d.append(h);
-const meta=document.createElement('div');meta.className='meta';meta.textContent=(i.kind==='mail'?'메일':'결재')+' · '+i.folders.join(', ')+'\n'+new Date(i.captured_at).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'})+' KST'+(i.kind==='mail'&&!i.eml?' · 메일 원문 미확보: 화면 보관본':'');d.append(meta);
-const links=document.createElement('div');links.className='links';if(i.html)links.append(link('본문 보기',i.html));if(i.pdf)links.append(link('PDF',i.pdf));if(i.eml)links.append(link('메일 원문 EML',i.eml));for(const a of i.attachments)links.append(link('첨부: '+a.name,a.path));d.append(links);$('list').append(d)}$('more').hidden=shown>=found.length}
+const meta=document.createElement('div');meta.className='meta';meta.textContent=(i.kind==='mail'?'메일':'결재')+' · '+i.folders.join(', ')+'\n'+new Date(i.captured_at).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'})+' KST'+(i.kind==='mail'&&!i.eml&&!i.mbox?' · 메일 원문 미확보: 화면 보관본':'');d.append(meta);
+const links=document.createElement('div');links.className='links';if(i.html)links.append(link('본문 보기',i.html));if(i.pdf)links.append(link('PDF',i.pdf));if(i.eml)links.append(link('메일 원문 EML',i.eml));if(i.mbox)links.append(link('원본 MBOX',i.mbox));if(i.json)links.append(link('원본 DB 기록',i.json));for(const a of i.attachments)links.append(link('첨부: '+a.name,a.path));d.append(links);$('list').append(d)}$('more').hidden=shown>=found.length}
 for(const id of ['q','kind'])$(id).addEventListener('input',()=>{shown=50;render()});$('more').onclick=()=>{shown+=50;render()};render();
 </script></html>'''

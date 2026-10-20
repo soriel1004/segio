@@ -1,142 +1,98 @@
 # SEGIO 문서·메일 보관 프로그램
 
-퇴사자 계정을 삭제하기 전에 결재 문서와 메일을 보관하고, Windows에서 계정 없이 검색·열람하는 프로그램입니다. **직원 SEGIO 로그인으로 관리자가 준비한 본인 DB 보관본을 받는 방식**, 웹 화면 수집, 서버 관리자 DB 일괄 추출을 제공합니다. 서버의 계정·문서·메일을 삭제하는 기능은 없습니다.
+Windows에서 직원의 **SEGIO ID·암호**로 로그인해 현재 결재 DB 자료와 서버 MBOX 전체를 가져오고, 계정 없이 검색·열람하는 프로그램입니다. 기본 방식은 **DB·MBOX 바로 가져오기**입니다. 결재·메일 웹페이지를 순회하지 않으며 기존 SEGIO 로그인에만 브라우저를 사용합니다.
 
-**현재 상태: [GitHub Actions #11](https://github.com/soriel1004/segio/actions/runs/39376494089)에서 Linux·Windows 모의 서버 시험과 Windows EXE 빌드가 모두 통과했습니다.** 실행용 ZIP은 해당 실행의 `SEGIOArchive-Windows` 아티팩트에 있습니다. 운영 SEGIO 연결·실제 직원 자료 대조와 생성한 EXE의 현장 실행은 별도 확인이 필요합니다. 계정 삭제는 시험 환경에서 영향을 확인한 후 진행해야 합니다.
+**서버에는 연결 기능을 한 번 설치합니다.** 이후 Windows에서 요청할 때마다 인증된 직원의 자료를 새로 추출합니다. 직원별 보관 ZIP을 미리 만들 필요가 없습니다. 자세한 명령과 오류 확인은 **[서버 설치·Windows 실행 안내](docs/WINDOWS_LOGIN.md)**를 보세요.
 
-**Windows 직원 로그인·다운로드는 [서버 준비 및 실행 안내](docs/WINDOWS_LOGIN.md)를 따라 설치하세요.** 서버에서 `prepare_login_archive.py --user koro --web-user 실제웹실행계정`으로 직원별 DB 보관본을 준비한 뒤 Windows에서 직원의 기존 SEGIO ID·암호로 로그인하면 해당 보관 ZIP을 내려받아 검증·압축 해제합니다. DB 암호·관리자 로그인을 Windows에서 요구하지 않습니다. 받는 자료는 서버 준비 시점의 스냅샷이며 갱신하려면 준비 명령을 다시 실행합니다.
+## 서버에 한 번 설치
 
-**결재 문서를 DB에서 한 번에 추출하려면 [서버 DB 일괄 보관 안내](docs/DB_ARCHIVE.md)를 보세요.** 운영 PostgreSQL 8.4.20 구조 보고서를 기준으로 구현했으며, 임시 PostgreSQL 16.2와 합성 자료로 검증했습니다. 사용자는 운영 서버에서 `koro`의 현재 문서 65개와 ZIP 생성에 성공했다고 알려주었습니다. 이후 확인된 본문 인코딩·Base64 서명 표시 수정본의 운영 결과는 대조가 필요합니다. 서버에서 기존 SEGIO DB 접속 설정으로 자료를 읽고 정적 HTML·원본 기록·첨부·검증 정보가 든 ZIP을 만듭니다. Windows에서는 ZIP을 풀고 `index.html`을 열 수 있으며 별도 브라우저 다운로드가 필요하지 않습니다. 개인 관계로 확인되는 문서를 대상으로 하며 부서 공용 수신·확장 업무·메일은 이 DB 추출기의 범위에 포함하지 않습니다. 구조 수집과 인증 문제의 진단 기록은 [DB 구조 확인 안내](docs/DB_EXPORT.md)에 있습니다.
+[최신 소스 ZIP](https://github.com/soriel1004/segio/archive/refs/heads/main.zip)의 **`tools` 전체**를 CentOS 서버 `/root/tools`에 복사합니다. 실제 웹 서비스의 Linux 실행 계정이 `segio`인 경우 root로 실행합니다.
+
+```bash
+cd /root/tools
+python ./install_live_archive.py --web-user segio \
+  --config /home/segio/cell000/etc/db.conf
+```
+
+다른 비-root 웹 실행 계정이면 `--web-user`를 바꿉니다. 기존 DB 설정을 사용하며 PostgreSQL 암호·인증 설정·원본 권한은 변경하지 않습니다. 웹 실행 계정이 기존 DB 설정·첨부·메일을 읽을 수 있어야 합니다. 원격 PostgreSQL 공개나 Windows에 DB 암호 저장은 필요하지 않습니다.
+
+메일 기본 경로는 **`/home/segio/cell000/home/{initial}/{user}/mbox`**입니다. `koro`는 사용자가 알려준 `/home/segio/cell000/home/k/koro/mbox`에 대응합니다. 서버가 확인한 로그인 사용자만 대상이 됩니다.
 
 ## Windows에서 실행
 
-지원 대상은 Windows 10/11 64비트와 Python 3.12 64비트입니다.
+1. [GitHub Actions](https://github.com/soriel1004/segio/actions)에서 최신 **성공한 v0.3.0 이상** 실행을 열고 `SEGIOArchive-Windows` 아티팩트를 받습니다. 압축을 풀어 폴더 전체를 유지하고 `SEGIOArchive.exe`를 실행합니다.
+2. 소스 ZIP으로 실행하려면 Python 3.12 64비트를 설치한 뒤 새 폴더에 압축을 풀고 `run_windows.bat`을 실행합니다. 로그인 창을 열기 전에 Chromium을 다운로드하지 않습니다.
+3. **DB·MBOX 바로 가져오기**에서 서버 주소, 직원 SEGIO ID·암호, 저장 폴더를 입력합니다. **결재 문서**, **메일**은 둘 다 기본 선택이며 하나만 선택할 수도 있습니다.
+4. **로그인하고 수집 시작**을 누릅니다. 로그인 → 현재 DB 읽기 → MBOX 전체 복사 → 다운로드·무결성 검증 → Windows 검색 DB 생성 순서로 진행합니다.
+5. **보관함 열기**에서 검색창에 **메일 제목**을 입력하면 해당 메일이 표시됩니다. 종류를 `mail`로 선택하면 메일만 검색하며 보낸 사람·받는 사람·본문도 검색합니다.
 
-1. Python 공식 배포본 3.12 64비트를 설치합니다. Python Launcher(`py`)도 설치합니다.
-2. 이 프로젝트 ZIP을 쓰기 가능한 폴더에 압축 해제합니다. ZIP 안에서 바로 실행하지 마세요.
-3. `run_windows.bat`을 실행합니다. 필요한 Python 패키지를 준비한 뒤 ID·암호 입력 화면이 열립니다. 이 단계에서는 Chromium을 다운로드하지 않습니다.
-4. 서버 주소를 확인하고, 백업할 사용자 ID·암호와 저장할 상위 폴더를 입력합니다.
-5. 기본 방식 **서버 DB 보관본 받기**에서 **로그인하고 수집 시작**을 누릅니다. 관리자가 준비한 본인 보관 ZIP을 받고 검증한 뒤 `segio-ID` 폴더와 `segio-ID.zip`으로 저장합니다. 기존 이름이 있으면 번호를 붙입니다. 메일·웹 수집·PDF는 **웹 화면 수집 (결재·메일)** 방식을 선택합니다.
-6. 완료 후 **보관함 열기**에서 문서·메일을 검색하고, **파일 무결성 검증**으로 내려받은 파일이 손상·변경되지 않았는지 확인합니다.
+저장 이름은 **`segio-koro`**, **`segio-koro.zip`**처럼 짧게 만듭니다. 이름이 겹치면 `-2`, `-3`을 붙여 기존 자료를 보존합니다. 다시 실행하면 당시 자료를 새로 조회합니다.
 
-수집할 때 Windows에 설치된 **Microsoft Edge → Google Chrome → 전용 Chromium** 순서로 사용 가능한 브라우저를 확인합니다. 개인 브라우저의 로그인 정보·쿠키·프로필은 사용하지 않고 별도 임시 창을 엽니다. 설치된 Edge나 Chrome이 있으면 별도 브라우저 다운로드가 필요 없습니다. 실행 중인 개인 브라우저를 종료할 필요도 없습니다.
-
-### Chromium 다운로드의 `_dir_lock` 오류가 났던 경우
-
-이전 실행기는 로그인 창을 열기 전에 브라우저를 다운로드했습니다. `Unable to update lock within the stale threshold ... .browser\__dir_lock` 오류는 이 다운로드 단계의 잠금 갱신 실패이며, ID·암호 인증 오류가 아닙니다.
-
-1. 오류가 난 명령 창을 닫습니다.
-2. GitHub에서 최신 ZIP을 받아 새 폴더에 압축을 풉니다. 기존 보관 폴더는 그대로 둡니다.
-3. Windows에 Edge 또는 Chrome이 설치되어 있는지 확인하고 새 폴더의 `run_windows.bat`을 실행합니다.
-
-`.browser` 폴더나 잠금 파일을 삭제할 필요는 없습니다. 수정본은 로그인 화면을 열 때 브라우저를 다운로드하지 않습니다. Edge·Chrome이 없는 PC에서 전용 Chromium을 설치하려는 경우에만 `install_browser_windows.bat`을 사용하세요. 전용 브라우저 캐시는 프로젝트 폴더 대신 `%LOCALAPPDATA%\SEGIOArchive\Browsers`에 저장합니다. 기존 `PLAYWRIGHT_BROWSERS_PATH` 설정이 있으면 유지합니다. 선택 설치가 실패해도 로그인 창과 기존 보관함은 사용할 수 있으며, 수집에는 정상 실행 가능한 브라우저가 필요합니다. 인증서 검증을 끄거나 다른 설치가 진행 중인 잠금 파일을 지우지 마세요.
-
-기본 로그인 주소는 사용자가 제공한 다음 주소입니다. 채팅에서 전달된 `&amp;`는 프로그램이 `&`로 변환합니다. 마지막 `:483`도 전달받은 값 그대로 보존했습니다. 실제 브라우저에서 사용하는 주소와 다르면 수정하세요.
+기본 로그인 주소:
 
 ```text
 http://lssgroup.co.kr/icons/app/cms/?html=/home/login.html&shell=/index.shell:483
 ```
 
-사내 PC에서는 실제 로그인 주소에 맞춰 호스트를 `192.168.0.100`으로 바꿀 수 있습니다. 사내 IP는 사내망에 연결된 PC에서 사용하세요. 실제 서버의 주소·포트·인증서는 그대로 사용하고 인증서 오류를 무시하지 않습니다.
+사내망에서는 실제 로그인 주소의 호스트를 `192.168.0.100`으로 바꿀 수 있습니다. 채팅 주소의 `&amp;`는 자동 정규화합니다. HTTP는 **암호화되지 않은 HTTP 연결 허용**을 명시적으로 선택하고 신뢰하는 사내망에서 사용합니다. HTTPS 인증서 검증은 유지합니다. DB·관리자 암호는 입력하지 않으며 직원 암호·쿠키도 저장하지 않습니다.
 
-HTTP 주소는 **암호화되지 않은 HTTP 연결 허용**을 명시적으로 선택해야 합니다. HTTPS 로그인으로 전환되는 경우에는 같은 호스트의 HTTPS 폼 목적지를 사용하며 인증서 검증을 유지합니다. 암호는 명령행 인수·파일·설정에 넣지 않습니다. 자동 로그인이 맞지 않으면 **브라우저에서 직접 로그인**을 선택하세요. DB 보관본 받기는 서버가 확인한 로그인 ID와 입력 ID를 비교하며 다르면 거부합니다. 웹 화면 수집의 직접 로그인은 사용자가 실제 계정을 확인해야 합니다.
+로그인에는 설치된 Edge → Chrome → 전용 Chromium 순서로 사용 가능한 브라우저를 찾고 별도 임시 프로필을 사용합니다. 기존 개인 브라우저를 종료할 필요는 없습니다. 과거 `.browser\__dir_lock` 다운로드 오류가 발생했다면 최신 소스를 새 폴더에 풀어 실행하세요. Edge·Chrome이 없는 PC에서만 `install_browser_windows.bat`으로 전용 브라우저를 선택 설치합니다.
 
-암호화되지 않은 기존 HTTP 서버가 유일한 접속 수단이라면 신뢰할 수 있는 사내망에서 사용하세요. 이 프로그램은 보관 폴더를 암호화하지 않습니다. 운영 계정의 암호나 실제 직원 문서·메일을 채팅으로 보내지 마세요.
+## 가져오는 자료
 
-## 보관 내용
+- **결재 DB**: 기안·결재선·대결·참조·자동회람·개인 수신 관계의 문서와 관련 이력·댓글·표시 정보. 본문·결재선 HTML, 원래 DB 값, 첨부를 보관합니다.
+- **메일 원본 전체**: 직원 MBOX 폴더 아래 모든 일반 파일과 하위 폴더 파일을 바이트 그대로 보존합니다. 원래 이름·상대 경로와 보관 파일의 대응 및 해시는 `mail/sources.json`에 저장합니다.
+- **메일 제목 검색**: 표준 MBOX/RFC822의 UTF-8·EUC-KR·CP949 제목·헤더·본문·첨부를 Windows에서 색인합니다. 서버 웹메일을 열거나 읽음 상태를 바꾸지 않습니다.
+- **개인 로컬 DB**: `catalog.sqlite3`에 검색 정보와 결재 원본 JSON을 넣습니다. 서버 DB 암호나 다른 직원의 무관한 자료는 포함하지 않습니다.
 
-- 결재: 표시된 결재함 목록, 문서 본문과 결재선·의견, 확보한 직인·서명·본문 이미지, 관련 문서, 원본 첨부, PDF.
-- 메일: 기본·사용자 메일함 목록, 제목·본문·표시된 헤더와 첨부, 확보 가능한 경우 EML 원문.
-- 검색: 제목·본문·표시된 기안자·결재자·메일 주소·폴더 이름.
-- 검증: 자료별 식별자, 수집 범위·건수, 실패 내역, 파일 크기와 SHA-256.
+`cell_000`은 직원 공용 DB입니다. 전체 DB 복제 대신 로그인 직원에게 관련된 결재 행을 한 읽기 전용 DB 스냅샷으로 추출합니다. 댓글·즐겨찾기·내부 저장 기록만으로 연결된 문서는 대상 선정에서 제외합니다. 설치 관리자가 승인하는 개인 기록 보관 범위이며, 인코딩된 SEGIO 원본의 화면별 권한 판정과 동일하다고 검증된 기능은 아닙니다. 부서 권한만으로 열리는 문서·확장 업무는 포함하지 않습니다.
 
-**메일 원문을 받을 수 없는 화면에서는 HTML 본문과 확보한 첨부만 저장하고 ‘메일 원문 미확보’를 표시합니다.** 이런 자료를 완전한 원본 메일 백업이라고 표시하지 않습니다. 서버가 제공하는 화면과 다운로드 경로가 다르면 연결 코드를 조정해야 합니다. POP3·IMAP의 존재나 표준 MBOX 파일 저장 형식을 가정하지 않습니다.
+메일의 알 수 없는 고유 형식 파일도 원본은 가져오고 `mail/index-issues.json`에 남깁니다. 실제 서버의 고유 파일 형식과 모든 제목의 해독 여부는 현장 대조가 필요합니다. 개별 메일이 32 MiB보다 크면 제목·헤더만 색인하며 전체 본문·첨부는 원본 MBOX/EML에 보존합니다. 복사 중 메일이 변경되면 완료로 처리하지 않으므로 변경이 적은 시간에 다시 실행합니다. 심볼릭 링크와 특수 파일은 거부합니다.
 
-이미지는 로그인한 서버에서만 가져옵니다. 다른 서버의 이미지·자료는 자동 수집하지 않으며, 지원하지 않는 이미지나 다운로드 실패는 경고로 남깁니다. PDF는 보관 HTML에서 생성하므로 누락된 이미지가 PDF에서도 복원되는 것은 아닙니다. 원래 전자서명의 암호학적 검증 기능까지 보존하지는 않습니다.
+결재·메일 원본을 서버에서 삭제하거나 수정하지 않습니다. DB 조회와 파일 복사는 서로 다른 시점이므로 전체 서버 복구용 백업은 별도로 필요합니다. 이 모드에서 PDF 자동 생성은 제공하지 않으며 결재 HTML을 브라우저로 인쇄할 수 있습니다.
 
-완료·진행·반려·참조·수신 등 실제 화면에 나타난 지원 결재함을 수집합니다. 없는 결재함을 임의로 추측해 호출하지 않습니다. 관련 문서도 화면에 표시된 링크만 따라갑니다. 최대 300페이지/함, 10,000개 항목, 첨부당 100MiB, 관련 문서 깊이 5 제한이 있으며 제한·누락을 결과에 기록합니다. 첨부 크기 검사는 응답을 메모리에 받은 후에도 수행하므로 매우 큰 파일의 스트리밍 백업용은 아닙니다.
-
-목록과 문서 조회는 GET으로 수행합니다. 인증 후 POST 및 알려진 변경 동작 경로를 차단하고 버튼을 누르지 않습니다. 기존 서버가 GET 조회만으로 남기는 열람 이력이나 메일 읽음 상태 변경까지 막을 수는 없습니다. 메일 수집을 켜면 이 내용을 로그와 결과에 기록합니다.
-
-## 보관 폴더
+## 보관 폴더와 열람
 
 ```text
-사용자ID_날짜시각_임의값/
-  index.html                 검색·열람 화면
-  catalog.sqlite3            검색 대상 본문·문서·메일 정보
-  manifest.json              수집 범위·건수·오류·파일 해시
-  documents/
-    approval-.../
-      document.html          서버 연결 없는 보관 본문
-      document.pdf           PDF 옵션 사용 시
-      attachments/           원본 첨부
-    mail-.../
-      document.html
-      message.eml            원문을 확보한 경우에만 생성
-      attachments/
+segio-koro/
+  index.html                   결재·메일 검색·열람
+  catalog.sqlite3              개인 검색 DB와 결재 원본 기록
+  catalog.json                 검색 목록
+  manifest.json                범위·건수·파일 해시
+  documents/.../               결재 HTML·원래 DB 값·첨부
+  mail/raw/...                 MBOX 전체 원본 파일
+  mail/sources.json            원래 메일 경로와 보관 파일 대응
+  mail/messages/...            메일별 화면·첨부
+  mail/index-issues.json        메일 색인 확인 사항
 ```
 
-이 폴더 **전체**를 함께 복사해야 합니다. `index.html`은 일반 브라우저에서도 직접 열 수 있는 형태이며, 프로그램의 ‘보관함 열기’는 파일 접근 제한에 대응하기 위해 로컬 PC의 127.0.0.1에만 연결되는 임시 열람 서버를 엽니다. 외부 서버나 인터넷은 필요하지 않습니다. 프로그램을 닫으면 이 임시 열람 서버도 종료합니다. 생성 문서의 스크립트·폼·원래 서버 링크는 제거하고 외부 통신을 제한합니다.
+폴더 전체를 함께 복사합니다. `index.html`은 일반 브라우저에서 직접 열 수 있습니다. 프로그램의 **보관함 열기**는 127.0.0.1에만 연결되는 임시 열람 서버를 사용하며 인터넷·SEGIO 계정 없이 동작합니다. 생성 화면에서는 원래 스크립트·폼·외부 이미지를 제거합니다. 원본 첨부는 해당 형식의 Windows 프로그램으로 열고 MBOX/EML은 호환 메일 프로그램으로 가져올 수 있습니다.
 
-기본적으로 본문 링크는 비활성화하며 수집된 첨부·관련 문서의 로컬 링크를 별도로 제공합니다. 원본 첨부는 파일 형식에 맞는 Windows 프로그램이 필요합니다. EML은 호환 메일 프로그램으로 가져오거나 열 수 있습니다.
+**파일 무결성 검증**은 받은 파일의 SHA-256을 확인합니다. 운영 서버에 존재하던 자료를 모두 받았는지는 대표 문서·메일함·건수를 별도 대조해야 합니다. `account_deletion_verified`는 항상 `false`이며 이 프로그램은 계정을 삭제하거나 계정 삭제 영향을 승인하지 않습니다. 삭제 전 네트워크를 끊고 본문·결재선·서명·첨부·메일 제목을 확인하고, 서버 전체 백업과 복제 환경의 삭제 영향 확인을 진행하세요.
 
-## 수집 결과 해석
-
-| 상태 | 의미 |
-|---|---|
-| `collected` | 선택한 수집 경로가 실행되었고 추가 경고가 없음. 운영 대조·계정 삭제 검증을 뜻하지 않음 |
-| `collected_with_warnings` | 수집은 끝났지만 원문 미확보·누락·건수 미확인·메일 읽음 변경 가능성 등 경고가 있음 |
-| `partial` | 일부를 저장한 뒤 오류 발생 |
-| `failed` | 로그인·연결 실패 등으로 수집 실패 |
-| `cancelled` | 사용자가 중단. 이미 저장된 자료와 실패 내역을 유지 |
-
-함별 `coverage`는 기대 건수, 발견 건수, 저장 건수, 조회 페이지 수를 기록합니다. 기대 건수를 확인하지 못한 빈 화면은 ‘0개 백업 성공’으로 간주하지 않습니다. `count_mismatch`, `count_unverified`, `empty_unverified`, `limited`, `item_failure`, `failed`, `not_found`는 추가 확인이 필요합니다.
-
-파일 해시 검사는 **받아 놓은 파일의 손상 여부**를 검사합니다. 서버에 존재하던 자료를 모두 받았는지는 목록·건수 대조로 따로 확인해야 합니다. `manifest.json`의 `account_deletion_verified`는 항상 `false`이며 프로그램은 계정 삭제를 승인하지 않습니다. manifest 자체의 위변조를 방지하는 서명 기능은 없습니다.
-
-## 계정 삭제 전 확인
-
-1. 시험 계정과 대표 문서·메일로 먼저 수집합니다. 실제 화면의 각 함·메일 폴더와 발견·저장 건수를 대조합니다.
-2. Windows PC의 네트워크를 끊고 본문, 결재자 이름·서명·일시, 댓글, 직인, 이미지, 첨부, 관련 문서를 엽니다.
-3. 계정 삭제 후 이름 표시 등에 영향을 줄 수 있으므로 삭제 전에 표시 정보를 보관합니다. 진행 중 결재는 인계·결재선 변경 여부를 확인합니다.
-4. PostgreSQL·파일·회원 정보를 포함한 서버 전체 백업을 별도로 확보합니다.
-5. 복제 환경에서 계정을 삭제하고 다른 재직자의 문서와 결재 이력에 영향이 없는지 확인합니다. 개인별 열람용 아카이브는 서버 복구용 백업을 대신하지 않습니다.
-
-## 명령행
+## 명령행·기존 방식
 
 ```powershell
-.venv\Scripts\python.exe -m segio_archive collect --server "http://lssgroup.co.kr/icons/app/cms/?html=/home/login.html&shell=/index.shell:483" --user USER_ID --output "D:\SEGIO보관함" --allow-http
-.venv\Scripts\python.exe -m segio_archive view "D:\SEGIO보관함\보관폴더"
-.venv\Scripts\python.exe -m segio_archive verify "D:\SEGIO보관함\보관폴더"
+.venv\Scripts\python.exe -m segio_archive collect-db --server "http://lssgroup.co.kr/icons/app/cms/?html=/home/login.html&shell=/index.shell:483" --user koro --output "D:\SEGIO보관함" --allow-http
+.venv\Scripts\python.exe -m segio_archive view "D:\SEGIO보관함\segio-koro"
+.venv\Scripts\python.exe -m segio_archive verify "D:\SEGIO보관함\segio-koro"
 ```
 
-암호는 화면에서 숨김 입력합니다. 옵션은 `--no-mail`, `--no-approvals`, `--no-pdf`, `--manual-login`, `--headless`, `--max-pages N`입니다. GUI가 없는 개발 환경에서는 `--headless`를 사용합니다. `collect` 종료 코드는 경고 없는 수집 0, 경고·오류·중단 2, Ctrl+C 130입니다. `verify`는 파일 정상 0, 오류 2입니다.
+암호는 숨김 입력합니다. `collect-db` 옵션은 `--no-mail`, `--no-approvals`, `--manual-login`, `--headless`입니다. 경고가 있는 수집은 종료 코드 2이며 받은 자료는 보관됩니다. 무결성 검사는 정상 0, 오류 2입니다.
 
-## Windows EXE 만들기
+관리자 직접 DB 일괄 추출은 [DB 보관 안내](docs/DB_ARCHIVE.md), 구조·접속 진단은 [DB 구조 확인 안내](docs/DB_EXPORT.md)를 보세요. 이전 `prepare_login_archive.py`의 사전 ZIP 전달과 새 실시간 모드는 별개입니다. 선택형 **웹 화면 수집 (결재·메일)** / 명령 `collect`도 이전 호환용으로 남아 있습니다. 이 방식의 메일은 화면과 확보 가능한 EML을 보관하며 원문 미확보·조회에 따른 읽음 상태 변경 가능성을 경고합니다. 현재 요청의 기본 DB·MBOX 모드에서는 웹메일 수집을 사용하지 않습니다.
 
-Windows에서 Python 3.12와 PowerShell로 실행합니다.
-
-```powershell
-.\build_windows.ps1
-```
-
-PyInstaller로 Chromium을 포함한 `dist/SEGIOArchive-Windows.zip`을 만듭니다. ZIP을 풀어 **폴더 전체를 유지**하고 `SEGIOArchive.exe`를 실행합니다. EXE 하나만 복사하지 마세요. 실행 파일 코드 서명과 Windows 실제 배포 시험은 별도입니다. 현재 Linux 작업 환경에서는 Windows EXE를 빌드·실행하지 않았습니다.
-
-GitHub에 코드를 반영하면 `.github/workflows/windows.yml`의 **Windows package** 작업이 Linux·Windows에서 합성 자료 통합 시험을 수행합니다. 양쪽 시험이 모두 통과하면 Windows EXE를 빌드하고 `SEGIOArchive-Windows` 아티팩트를 제공합니다. 시험은 준비된 PHP 8.4와 Playwright Chromium을 사용하며, 결과 건수·실패한 시험 이름·오류 내용은 Actions 실행의 Summary에도 표시합니다.
-
-## 개발·시험
-
-클라우드 작업에는 이미 격리된 체크아웃이 있으므로 별도 Git worktree를 만들 필요가 없습니다.
+## 개발·검증과 Windows 빌드
 
 ```bash
 python -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python -m playwright install chromium
-.venv/bin/python -m unittest discover -s tests -v
+SEGIO_TEST_PHP=php .venv/bin/python tools/run_ci_tests.py
 ```
 
-Chromium이 시스템에 설치되어 있으면 개발 시 대체 실행할 수 있습니다. Windows에서는 Edge·Chrome의 기본 설치 경로와 App Paths 등록 정보를 확인합니다. 모의 시험은 루프백 서버와 합성 문서·메일을 사용하며 운영 데이터나 운영 암호를 사용하지 않습니다. 브라우저 다운로드·인증서 검증을 우회하지 않습니다.
+GitHub Actions는 Python 3.12·PHP 8.4·Playwright로 Linux와 Windows에서 시험한 뒤 Windows EXE를 빌드합니다. `build_windows.ps1`로 Windows에서 직접 빌드할 수도 있습니다. 패키지에는 서버 설치 도구와 안내도 포함합니다. 생성 EXE의 현장 실행과 운영 SEGIO 연결은 별도 확인이 필요합니다.
 
-실제 로그인 폼은 숨김 필드·iframe 대상·제출 버튼을 유지하여 처리합니다. 지원 화면의 DOM은 `segio_archive/web.py`, 보관 형식과 검색 화면은 `archive.py`, 로컬 열람은 `viewer.py`, Windows UI는 `gui.py`에 있습니다.
+시험은 합성 DB·메일과 실제 PHP 연결 코드를 사용합니다. 실시간 재조회, MBOX 원본 보존, 한글 제목·MIME 첨부·오프라인 검색, 다른 계정 차단, CSRF·경로·파일 검증을 포함합니다. 검증 기록은 [VALIDATION.md](VALIDATION.md)에 있습니다. 서버 코드는 Python 2.6/PHP 5.3 호환 API로 작성했으나 실제 구버전 런타임은 운영 설치 후 확인해야 합니다.
 
-업로드된 SEGIO 배포본의 Zend 인코딩 PHP나 서버 실행 파일을 이 프로그램에 포함하거나 수정하지 않았습니다. 실제 운영 서버는 이 환경에서 HTTP/HTTPS 접속 시 403 응답으로 접근하지 못했으므로, 운영 로그인·문서 수집을 성공했다고 주장하지 않습니다.
+업로드된 SEGIO의 Zend 인코딩 소스·실행 파일을 배포물에 포함하거나 수정하지 않았습니다. 운영 사이트는 이 클라우드 연결에서 403 응답을 받아 실제 운영 로그인·자료 추출은 검증하지 못했습니다. 운영 암호·실제 문서·메일을 채팅으로 보내지 마세요.

@@ -104,7 +104,7 @@ def member_sql(column, uid, structured=False):
             "AS tok(value) WHERE %sbtrim(split_part(tok.value,'@@',1))=%s)" % (column, condition, uid))
 
 
-def selection_sql(username):
+def selection_sql(username, live_scope=False):
     uid = "convert_from(decode('%s','hex'),'UTF8')" % binascii.hexlify(username.encode("utf-8")).decode("ascii")
     choices = []
     for table in ("approval_document", "approval_document_backup"):
@@ -115,15 +115,17 @@ def selection_sql(username):
             rules.append("EXISTS (SELECT 1 FROM public.approval_line%s l WHERE l.p_no=d.no AND (l.uid=%s OR l.target_id=%s))" % (suffix, uid, uid))
             send_rule = " OR ".join(["s.doc_uid=" + uid, member_sql("s.recv_user", uid), member_sql("s.recv_uid", uid)])
             rules.append("EXISTS (SELECT 1 FROM public.approval_send_box%s s WHERE s.doc_no=d.no AND (%s))" % (suffix, send_rule))
-            rules.append("EXISTS (SELECT 1 FROM public.approval_comment_info%s c WHERE c.doc_no=d.no::text AND c.uid=%s)" % (suffix, uid))
-            rules.append("EXISTS (SELECT 1 FROM public.approval_doc_backup%s b WHERE b.p_no=d.no AND b.uid=%s)" % (suffix, uid))
-        rules.append("EXISTS (SELECT 1 FROM public.approval_favorite f WHERE f.doc_no=d.no AND f.uid=%s)" % uid)
+            if not live_scope:
+                rules.append("EXISTS (SELECT 1 FROM public.approval_comment_info%s c WHERE c.doc_no=d.no::text AND c.uid=%s)" % (suffix, uid))
+                rules.append("EXISTS (SELECT 1 FROM public.approval_doc_backup%s b WHERE b.p_no=d.no AND b.uid=%s)" % (suffix, uid))
+        if not live_scope:
+            rules.append("EXISTS (SELECT 1 FROM public.approval_favorite f WHERE f.doc_no=d.no AND f.uid=%s)" % uid)
         choices.append("SELECT d.no FROM public.%s d WHERE (%s)" % (table, " OR ".join(rules)))
     return " UNION ".join(choices), uid
 
 
-def make_queries(username, model):
-    ids, uid = selection_sql(username)
+def make_queries(username, model, live_scope=False):
+    ids, uid = selection_sql(username, live_scope)
     queries = {}
     for table in model:
         if table in ("approval_document", "approval_document_backup"):
@@ -193,10 +195,10 @@ def read_rows(path):
     return result
 
 
-def query_database(config, username, work, binary="/usr/bin/psql"):
+def query_database(config, username, work, binary="/usr/bin/psql", live_scope=False):
     with open(os.path.join(HERE, "approval_db_columns.json"), "rb") as stream:
         model = json.loads(stream.read().decode("utf-8"))
-    queries = make_queries(username, model)
+    queries = make_queries(username, model, live_scope)
     sql = ["\\set ON_ERROR_STOP on", "BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY;",
            "SET LOCAL statement_timeout=60000;", "SET LOCAL client_encoding='UTF8';"]
     counts = " UNION ALL ".join(["SELECT '%s'::text AS table_name,count(*)::text AS row_count FROM (%s) counted" % (table, queries[table]) for table in sorted(queries)])
@@ -579,7 +581,7 @@ def reserve_archive_path(output, username):
         return path
 
 
-def run_export(config, username, output, cell=None, binary="/usr/bin/psql", progress=None):
+def run_export(config, username, output, cell=None, binary="/usr/bin/psql", progress=None, live_scope=False):
     notify = progress or (lambda message: None)
     if not re.match(r"^[A-Za-z0-9_.@-]{1,100}$", username):
         raise SafeError("Use an exact employee ID containing letters, digits, _, ., @ or -.")
@@ -594,13 +596,14 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
     success = False
     try:
         notify("Reading approval records in one read-only DB snapshot...")
-        rows, counts = query_database(config, username, work, binary)
+        rows, counts = query_database(config, username, work, binary, live_scope)
         notify("Snapshot checked: %d active documents, %d historical versions." %
                (counts["approval_document"], counts["approval_document_backup"]))
         shutil.rmtree(work)
         bundle = Bundle(folder, cell, username)
         notify("Copying attachments and building offline HTML...")
         items = render_bundle(bundle, rows, counts)
+        bundle.write("catalog.json", json.dumps({"items": items}, ensure_ascii=False))
         warnings = [u"계정 삭제 영향은 검증되지 않았습니다.",
                     u"개인 ID로 확인된 기안·결재·대결·참조·자동회람·개인 수신·댓글·즐겨찾기 및 관련 이력을 수집했습니다. 부서 공용 수신함·기타 권한으로 열리는 문서는 범위가 확인되지 않았습니다.",
                     u"DB는 한 읽기 전용 스냅샷으로 조회했습니다. 서버 파일은 이후 복사하므로 DB와 파일의 동일 시점을 보장하지 않습니다.",
@@ -609,6 +612,9 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
                     u"동적 이미지 주소·외부 이미지·사용자별 인쇄 서식은 원래 화면과 대조해야 합니다."]
         if bundle.issues:
             warnings.append(u"파일·본문·관련 문서 확인 사항: %d개 (issues.json 참조)" % len(bundle.issues))
+        if live_scope:
+            warnings[1] = u"로그인 ID의 기안·결재선·대결·참조·개인 수신 관계로 연결되는 DB 기록과 이력을 추출했습니다. 댓글·즐겨찾기만으로 연결된 문서는 제외합니다. 관리자 설치 시 승인한 개인 기록 보관 범위이며 SEGIO 화면별 권한과 동일하다고 검증되지 않았습니다."
+            warnings[3] = u"approval_ext_info/report/work 계열의 별도 업무·확장 기록은 이번 DB 수집 범위에 포함하지 않았습니다. 메일 선택 결과는 manifest.json의 mail 항목을 확인하세요."
         if not items:
             warnings.append(u"개인 관계로 확인된 문서가 0개입니다. 실제 결재함과 대조하기 전에는 자료가 없다고 판단할 수 없습니다.")
         manifest = {"format": "segio-db-html/1", "server": "cell_000", "user": username,

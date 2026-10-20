@@ -144,6 +144,36 @@ def main():
                 assert z.testzip() is None
                 z.extractall(unpacked)
             assert verify_archive(unpacked)["ok"]
+            # Run the actual on-demand worker against PostgreSQL too: the PHP
+            # integration fixtures exercise process/auth transport separately.
+            import live_export_worker as worker
+            from segio_archive.db_client import unpack_verified
+            from segio_archive.mail_import import build_local_catalog
+            live_root = root / 'live'
+            job_id = 'a' * 32
+            job = live_root / 'jobs' / job_id
+            job.mkdir(parents=True)
+            settings = {'root': str(live_root), 'cell': str(cell), 'db_config': str(config), 'psql': str(binary)}
+            worker.write_json(str(live_root/'config.json'), settings)
+            worker.write_json(str(job/'request.json'), {'username':'target','approvals':True,'mail':False,'created_at':1})
+            worker.run_job(str(live_root/'config.json'), job_id)
+            status = worker.read_json(str(job/'status.json'))
+            assert status['state'] == 'ready', status
+            live_copy = root/'live-windows-copy'
+            live_copy.mkdir()
+            unpack_verified(job/'archive.zip', live_copy, 'target')
+            live_manifest = build_local_catalog(live_copy, 'target')
+            assert live_manifest['snapshot_rows']['approval_document'] == 9
+            assert live_manifest['snapshot_rows']['approval_document_backup'] == 2
+            for excluded in (4, 6, 10, 11, 12, 15, 16):
+                assert not (live_copy/'documents'/str(excluded)).exists()
+            assert verify_archive(live_copy)['ok']
+            import sqlite3
+            with sqlite3.connect(live_copy/'catalog.sqlite3') as connection:
+                assert connection.execute('SELECT count(*) FROM items').fetchone()[0] == 11
+                assert connection.execute('SELECT count(*) FROM document_records').fetchone()[0] == 11
+            assert all(p.read_bytes() == data for p, data in originals.items())
+            assert run('SELECT count(*) FROM approval_document;', 'cell_000') == before
             from playwright.sync_api import sync_playwright
             from segio_archive.viewer import Viewer
             viewer = Viewer(unpacked)
@@ -174,7 +204,7 @@ def main():
                 browser.close()
             viewer.close()
     print("PASS: exact employee scope, active/history, snapshot counts, NULL/Unicode, attachment hashes, "
-          "missing/unsafe files, unchanged DB/auth, private credentials, Windows-copy ZIP, offline search and HTML isolation")
+          "missing/unsafe files, unchanged DB/auth, private credentials, live worker SQL/SQLite scope, Windows-copy ZIP, offline search and HTML isolation")
 
 
 if __name__ == "__main__":
