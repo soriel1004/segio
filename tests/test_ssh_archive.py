@@ -73,7 +73,7 @@ class SSHArchiveTests(unittest.TestCase):
                 self.assertTrue(item['html'].endswith('/index.html'))
                 from bs4 import BeautifulSoup
                 from urllib.parse import urljoin
-                attachment_url=BeautifulSoup(page,'html.parser').select_one('a[download]')['href']
+                attachment_url=BeautifulSoup(page,'html.parser').select_one('a.attachment')['href']
                 status,disposition,attachment=get(urljoin(item['html'],attachment_url))
                 self.assertEqual(status,200)
                 self.assertEqual(attachment,b'SYNTHETIC_ATTACHMENT')

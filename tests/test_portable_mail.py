@@ -89,7 +89,7 @@ class PortableMailTests(unittest.TestCase):
             from urllib.parse import unquote
             image=page.parent/unquote(soup.select_one('main img')['src'])
             self.assertEqual(image.read_bytes(),PNG)
-            payloads=[(page.parent/unquote(a['href'])).read_bytes() for a in soup.select('a[download]')]
+            payloads=[(page.parent/unquote(a['href'])).read_bytes() for a in soup.select('a.attachment')]
             self.assertIn(b'SYNTHETIC_ATTACHMENT',payloads)
             self.assertIn('두 번째 본문',(root/page_path('mail-000000001')).read_text(encoding='utf-8'))
             previous=page.stat().st_mtime_ns
@@ -180,8 +180,15 @@ class PortableMailTests(unittest.TestCase):
                                 self.assertEqual(page.locator('main img').evaluate('image=>image.complete && image.naturalWidth'),1)
                                 self.assertEqual(page.locator('body').evaluate('node=>getComputedStyle(node).fontSize'),'12px')
                                 link=page.get_by_role('link',name='../../CON.txt')
-                                with page.expect_download() as event:link.click()
-                                self.assertEqual(Path(event.value.path()).read_bytes(),b'SYNTHETIC_ATTACHMENT')
+                                if url.startswith('file:'):
+                                    # Chromium displays local text attachments directly;
+                                    # file links do not emit an HTTP download event.
+                                    link.click()
+                                    expect(page.locator('body')).to_contain_text('SYNTHETIC_ATTACHMENT')
+                                    page.go_back()
+                                else:
+                                    with page.expect_download() as event:link.click()
+                                    self.assertEqual(Path(event.value.path()).read_bytes(),b'SYNTHETIC_ATTACHMENT')
                                 page.get_by_role('link',name='메일 목록',exact=True).click()
                                 expect(page.locator('#tab-mail')).to_have_attribute('aria-selected','true')
                                 expect(page.locator('article')).to_have_count(2)

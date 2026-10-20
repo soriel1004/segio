@@ -80,6 +80,8 @@ def mime_parts(stream, start, end, checkpoint, depth=0):
         checkpoint()
         position=stream.tell()
         line=stream.readline(min(BLOCK,end-position))
+        if not line:
+            raise CollectionError('메일 원본이 잘렸습니다.')
         value=line.rstrip(b'\r\n \t') if line_start else b''
         if value in (marker,marker+b'--'):
             if len(delimiters)>10000:
@@ -218,7 +220,7 @@ def render_record(root, manifest, stream, record, checkpoint):
             text=decode_bytes(bytes(data),part.get_content_charset())
             (rich if part.get_content_type()=='text/html' else plain).append(text)
     content='\n'.join(safe_html(text,images) for text in rich) if rich else '<pre>'+html.escape('\n'.join(plain) or '본문이 없는 메일입니다.')+'</pre>'
-    attachment_html=''.join('<li><a download href="'+html.escape(quote(name,safe='/'),quote=True)+'">'+html.escape(filename)+'</a></li>' for filename,name in attachments)
+    attachment_html=''.join('<li><a class="attachment" href="'+html.escape(quote(name,safe='/'),quote=True)+'">'+html.escape(filename)+'</a></li>' for filename,name in attachments)
     extra=''.join('<p>'+html.escape(note)+'</p>' for note in dict.fromkeys(notes))
     title=html.escape(record['title'])
     page=f'''<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
