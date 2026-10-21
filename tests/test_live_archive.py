@@ -198,8 +198,15 @@ class LiveWorkerTests(unittest.TestCase):
                 if calls==3:
                     with (root/'home/e/employee/mbox/inbox.mbox').open('ab') as stream:
                         stream.write(b'new incoming mail')
-            with self.assertRaisesRegex(worker.SafeError,'mail_changed_retry'):
-                worker.copy_mail(settings['mail_template'],'employee',str(target),{'files':{},'counts':{},'coverage':[]},changed)
+            manifest={'files':{},'counts':{},'coverage':[]}
+            progress=[]
+            worker.copy_mail(settings['mail_template'],'employee',str(target),manifest,changed,
+                             lambda **fields:progress.append(fields))
+            source=next(item for item in worker.read_json(str(target/'mail/sources.json'))['sources']
+                        if item['name']=='inbox.mbox')
+            self.assertEqual((target/source['path']).read_bytes(),
+                             (root/'home/e/employee/mbox/inbox.mbox').read_bytes())
+            self.assertTrue(any(event['attempt']>1 for event in progress))
 
     def test_current_database_and_whole_user_mail_are_exported_without_other_account(self):
         with tempfile.TemporaryDirectory() as tmp:
