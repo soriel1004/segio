@@ -763,6 +763,55 @@ if ($path==='/login-legacy' && $_SERVER['REQUEST_METHOD']==='POST') {
             finally:
                 viewer.close()
 
+    def test_server_unlink_failure_is_not_acknowledged_and_can_be_retried(self):
+        import time,urllib.error,urllib.parse,uuid
+        bridge=self.root/'live.php'
+        original=bridge.read_text()
+        job_id=uuid.uuid4().hex
+        job=self.live_root/'jobs'/job_id
+        job.mkdir()
+        worker.write_json(str(job/'request.json'),{'username':'employee','created_at':int(time.time())})
+        worker.write_json(str(job/'status.json'),{'state':'ready'})
+        (job/'archive.zip').write_bytes(b'BACKUP')
+        endpoint=self.url+'/segio/archive/live.php'
+        opener=self.logged_in()
+        try:
+            with opener.open(endpoint+'?action=info') as response:token=json.load(response)['csrf']
+            body=urllib.parse.urlencode({'csrf':token}).encode()
+            bridge.write_text(original.replace('if (!@unlink($file)) return false;',"if (basename($file)==='archive.zip' || !@unlink($file)) return false;"))
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                opener.open(endpoint+'?action=cleanup&job='+job_id,data=body)
+            self.assertEqual(caught.exception.code,503)
+            self.assertEqual(json.load(caught.exception)['error'],'cleanup_failed')
+            self.assertTrue((job/'archive.zip').exists())
+            self.assertTrue((job/'request.json').exists())
+            bridge.write_text(original)
+            with opener.open(endpoint+'?action=cleanup&job='+job_id,data=body) as response:proof=json.load(response)
+            self.assertTrue(proof['job_deleted'])
+            self.assertFalse(job.exists())
+        finally:
+            bridge.write_text(original)
+            shutil.rmtree(job,ignore_errors=True)
+
+    def test_running_cleanup_requests_cancel_without_claiming_archive_deleted(self):
+        import time,urllib.parse,uuid
+        job_id=uuid.uuid4().hex
+        job=self.live_root/'jobs'/job_id
+        job.mkdir()
+        worker.write_json(str(job/'request.json'),{'username':'employee','created_at':int(time.time())})
+        worker.write_json(str(job/'status.json'),{'state':'running'})
+        (job/'archive.zip').write_bytes(b'IN_PROGRESS')
+        try:
+            opener=self.logged_in()
+            endpoint=self.url+'/segio/archive/live.php'
+            with opener.open(endpoint+'?action=info') as response:token=json.load(response)['csrf']
+            with opener.open(endpoint+'?action=cleanup&job='+job_id,data=urllib.parse.urlencode({'csrf':token}).encode()) as response:proof=json.load(response)
+            self.assertEqual(proof['state'],'cancellation_requested')
+            self.assertFalse(proof['archive_deleted'])
+            self.assertTrue((job/'cancel').exists())
+            self.assertTrue((job/'archive.zip').exists())
+        finally:shutil.rmtree(job,ignore_errors=True)
+
     def test_start_requires_csrf_and_rejects_other_account_job_access(self):
         opener=self.logged_in()
         import urllib.error
