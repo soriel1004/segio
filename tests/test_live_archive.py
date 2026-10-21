@@ -384,7 +384,7 @@ class LiveBridgeTests(NativePHPFixture, unittest.TestCase):
                 value = json.load(response)
             self.assertEqual(value['worker']['state'], 'ok')
             self.assertEqual(value['worker']['exit_code'], 0)
-            self.assertEqual(value['worker']['output_bytes'], 33)
+            self.assertEqual(value['worker']['output_bytes'], 32 + len(os.linesep.encode('ascii')))
         finally:
             bridge.write_text(original)
 
