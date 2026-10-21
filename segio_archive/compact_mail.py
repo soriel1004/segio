@@ -141,19 +141,25 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
     return install_search_page(root, manifest, checkpoint)
 
 
-def search(root: Path, query='', kind='', page=0):
+def search(root: Path, query='', kind='', page=0, mailbox=''):
     query = query[:200].replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
     pattern = '%'+query+'%'
-    where = r"(title LIKE ? ESCAPE '\' OR body LIKE ? ESCAPE '\' OR folders LIKE ? ESCAPE '\')"
-    parameters = [pattern, pattern, pattern]
+    folder_label="CASE WHEN kind='mail' THEN mailbox_label(folders) ELSE folders END"
+    where = r"(title LIKE ? ESCAPE '\' OR body LIKE ? ESCAPE '\' OR folders LIKE ? ESCAPE '\' OR "+folder_label+r" LIKE ? ESCAPE '\')"
+    parameters = [pattern, pattern, pattern,pattern]
     if kind in ('mail', 'approval'):
         where += ' AND kind=?'
         parameters.append(kind)
+    if mailbox and kind!='approval':
+        where+=" AND kind='mail' AND mailbox_key(folders)=?"
+        parameters.append(mailbox)
     with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro', uri=True)) as db:
+        from .mail_folders import MailFolders
+        MailFolders(root).register(db)
         total = db.execute('SELECT count(*) FROM items WHERE '+where, parameters).fetchone()[0]
-        rows = db.execute('SELECT id,kind,title,folders,html FROM items WHERE '+where+
+        rows = db.execute('SELECT id,kind,title,'+folder_label+",html,CASE WHEN kind='mail' THEN mailbox_key(folders) ELSE '' END,folders FROM items WHERE "+where+
                           ' ORDER BY rowid LIMIT 100 OFFSET ?', parameters+[max(0,min(page,1000000))*100]).fetchall()
-    items=[dict(zip(('id','kind','title','folder','html'), row)) for row in rows]
+    items=[dict(zip(('id','kind','title','folder','html','folder_id','source_folder'), row)) for row in rows]
     from .portable_mail import page_path
     for item in items:
         if item['kind']=='mail' and (root/page_path(item['id'])).is_file():
