@@ -10,6 +10,8 @@ SQLite 원본은 바꾸지 않고 읽기 전용 검색 함수와 분할 검색 �
 
 공용 도구 통합 후 로컬 전체 91개 시험과 최신 PHP 관련 21개 검사를 오류 없이 완료했습니다. Windows GUI 1개와 관리형 Chromium의 file URL 차단 4사례는 건너뛰었습니다. 분류 시험 4개에서 기본함·한글 하위 보관함·동일 이름 혼동 방지·Maildir 경로·미분류 EML, 1,104건의 메일함별 건수, 빈 폴더, 검색·쪽 이동·특수문자 포함 선택 복원, SQL 값 바인딩, 원본 파일 불변을 검사했습니다. HTTP 브라우저 검증도 통과했으며 실제 file URL 동작은 GitHub Actions의 Playwright Chromium에서 추가 확인합니다. 운영 서버의 메일함 별칭·저장 방식과 사용자 PC는 현장 대조가 필요합니다.
 
+최종 [Actions #35](https://github.com/soriel1004/segio/actions/runs/39519645184) (`a57ec0e`)에서 Linux·Windows 전체 95개 시험과 Windows EXE 빌드가 성공했습니다. 실제 file URL에서도 받은·보낸편지함, 사용자 보관함, 빈 폴더, 선택 검색·페이지 이동·새로고침 복원을 확인했습니다. Windows v0.4.4 아티팩트 ID `12310762220`, 페이지 표시 373 MB, SHA-256 `cd9b91bf7f5323c6dfbd5d5f0fd3cd3b34e3480926b7bc66db791dfb62fac260`입니다. 운영 직원 자료의 분류와 실제 사용자 PC는 별도 확인이 필요합니다.
+
 공용 PHP 진단 시험의 토큰 출력 바이트 수는 운영체제의 줄바꿈 길이를 반영합니다. Windows의 CRLF는 34바이트, Unix의 LF는 33바이트이며 실제 진단 응답의 원래 바이트 수를 변경하지 않습니다.
 
 ## PHP 작업기 실행 진단·종료 코드 보존
