@@ -230,7 +230,9 @@ def render_record(root, manifest, stream, record, checkpoint):
 <h1>{title}</h1><p>보낸 사람: {html.escape(record['sender'])}<br>받는 사람: {html.escape(record['receiver'])}<br>참조: {html.escape(header_text(message.get('Cc')))}<br>일시: {html.escape(record['date'])}</p>
 <main>{content}</main>{extra}<h2>첨부</h2><ul>{attachment_html or '<li>첨부 파일 없음</li>'}</ul></html>'''
     write(directory+'/index.html',[page.encode('utf-8')])
-    atomic_write(state_path,json.dumps({'source':fingerprint,'files':generated},ensure_ascii=False).encode('utf-8'))
+    atomic_write(state_path,json.dumps({'source':fingerprint,'files':generated,
+        'attachments':[{'name':filename,'path':directory+'/'+name} for filename,name in attachments]},
+        ensure_ascii=False).encode('utf-8'))
     generated[directory+'/state.json']=digest_file(state_path,checkpoint)
     manifest['files'].update(generated)
 

@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from segio_archive.archive import verify_archive
-from segio_archive.compact_mail import digest_file
+from segio_archive.compact_mail import digest_file, search
 from segio_archive.search_page import install_search_page
 from segio_archive.viewer import Viewer
 
@@ -30,6 +30,127 @@ def navigate(test, page, url):
 
 
 class SearchPageTests(unittest.TestCase):
+    def card_fixture(self, root):
+        from test_portable_mail import PortableMailTests
+        from segio_archive.portable_mail import prepare_archive
+        manifest=PortableMailTests().fixture(root)
+        catalog={'items':[]}
+        for identity,source in (('current','active'),('old','history')):
+            directory='documents/'+identity
+            files={directory+'/document.html':'<p>결재 본문 '+identity+'</p>',
+                   directory+'/database.json':'{"synthetic":true}',
+                   directory+'/한글 #첨부.txt':'SYNTHETIC_APPROVAL_ATTACHMENT'}
+            for name,text in files.items():
+                (root/name).parent.mkdir(parents=True,exist_ok=True)
+                (root/name).write_text(text,encoding='utf-8')
+                manifest['files'][name]=digest_file(root/name)
+            catalog['items'].append({'id':identity,'source':source,'title':'결재 '+identity,
+                'path':directory+'/document.html','json':directory+'/database.json',
+                'attachments':[{'name':'한글 #첨부.txt','path':directory+'/한글 #첨부.txt'},
+                               {'name':'unsafe','path':'../../secret'}]})
+        (root/'catalog.json').write_text(json.dumps(catalog,ensure_ascii=False),encoding='utf-8')
+        manifest['files']['catalog.json']=digest_file(root/'catalog.json')
+        with closing(sqlite3.connect(root/'catalog.sqlite3')) as db:
+            for item in catalog['items']:
+                db.execute('INSERT INTO items VALUES (?,?,?,?,?,?)',
+                           ('approval-'+item['id'],'approval',item['title'],'결재 문서','합성 검색 본문',item['path']))
+            db.commit()
+        manifest['files']['catalog.sqlite3']=digest_file(root/'catalog.sqlite3')
+        manifest.update(user='synthetic',server='cell_000',finished_at='2026-10-25T01:02:03Z',
+            state='collected_with_warnings',coverage=[{'kind':'approval','saved':2}],
+            warnings=['합성 자료 확인 사항'],snapshot_rows={'approval_document':1})
+        (root/'manifest.json').write_text(json.dumps(manifest),encoding='utf-8')
+        prepare_archive(root)
+        return json.loads((root/'manifest.json').read_text(encoding='utf-8'))
+
+    def test_cards_restore_original_db_and_attachment_links_without_reading_original_files(self):
+        from segio_archive.portable_mail import prepare_archive
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()
+            manifest=self.card_fixture(root)
+            # Simulate static-mail/1 metadata made by an earlier application.
+            state_path=root/'mail/offline/mail-000000000/state.json'
+            state=json.loads(state_path.read_text(encoding='utf-8'))
+            state.pop('attachments')
+            state_path.write_text(json.dumps(state),encoding='utf-8')
+            manifest['files'][state_path.relative_to(root).as_posix()]=digest_file(state_path)
+            manifest['browser_index']='offline-search/3'
+            (root/'manifest.json').write_text(json.dumps(manifest),encoding='utf-8')
+            original_open=Path.open
+            def guarded(path,*args,**kwargs):
+                if path.suffix=='.mbox' or 'attachments' in path.parts or path.name=='한글 #첨부.txt':
+                    self.fail('A presentation update must not read original mail or attachments')
+                return original_open(path,*args,**kwargs)
+            with patch.object(Path,'open',guarded):
+                prepare_archive(root)
+                approval=search(root,kind='approval',version='active')
+                history=search(root,kind='approval',version='history')
+                mail=search(root,kind='mail')
+            self.assertEqual(approval['total'],1)
+            self.assertEqual(history['items'][0]['presentation']['source'],'history')
+            detail=approval['items'][0]['presentation']
+            self.assertEqual(detail['json'],'documents/current/database.json')
+            self.assertEqual(detail['attachments'],[{'name':'한글 #첨부.txt','path':'documents/current/한글 #첨부.txt'}])
+            self.assertEqual(mail['items'][0]['presentation']['raw'],'mail/raw/000000.mbox')
+            self.assertEqual(len(mail['items'][0]['presentation']['attachments']),2)
+            rows=json.loads((root/'search/part-000000.js').read_text(encoding='utf-8').removeprefix('window.archiveChunk=').removesuffix(';'))
+            by_id={row[0]:row for row in rows}
+            for item in approval['items']+history['items']+mail['items']:
+                self.assertEqual(by_id[item['id']][8],item['presentation'])
+            updated=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
+            for name,value in manifest['files'].items():
+                if name!='index.html' and not name.startswith('search/'):
+                    self.assertEqual(updated['files'][name],value)
+                    self.assertEqual(digest_file(root/name),value)
+            self.assertTrue(verify_archive(root)['ok'])
+
+    @unittest.skipUnless(BROWSER,'Real Chromium required')
+    def test_card_actions_owner_history_and_mail_headers_match_in_http_and_file_views(self):
+        from playwright.sync_api import sync_playwright,expect
+        from urllib.parse import unquote
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()
+            self.card_fixture(root)
+            viewer=Viewer(root)
+            try:
+                with sync_playwright() as playwright:
+                    browser=playwright.chromium.launch(headless=True,executable_path=BROWSER)
+                    try:
+                        for url in (viewer.url,(root/'index.html').as_uri()):
+                            with self.subTest(url=url):
+                                page=browser.new_page()
+                                navigate(self,page,url)
+                                expect(page.locator('article')).to_have_count(2)
+                                expect(page.locator('#owner')).to_have_text('대상 ID: synthetic · 서버: cell_000')
+                                expect(page.locator('#backup-time')).to_contain_text('KST')
+                                page.get_by_text('수집 범위·검증 내역',exact=True).click()
+                                expect(page.locator('#coverage')).to_contain_text('합성 자료 확인 사항')
+                                page.locator('#version').select_option('history')
+                                expect(page.locator('article')).to_have_count(1)
+                                expect(page.locator('article .meta')).to_contain_text('과거 기록 · old')
+                                link=page.get_by_role('link',name='원본 DB 기록',exact=True)
+                                self.assertEqual(unquote(link.get_attribute('href')),'documents/old/database.json')
+                                with page.expect_popup() as opened:
+                                    link.click()
+                                popup=opened.value
+                                expect(popup.locator('body')).to_contain_text('synthetic')
+                                popup.close()
+                                attachment=page.get_by_role('link',name='첨부: 한글 #첨부.txt',exact=True)
+                                self.assertEqual(unquote(attachment.get_attribute('href')),'documents/old/한글 #첨부.txt')
+                                page.locator('#tab-mail').click()
+                                expect(page.locator('article')).to_have_count(2)
+                                expect(page.locator('#version')).to_be_hidden()
+                                expect(page.locator('article .meta').first).to_contain_text('보낸 사람: sender@example.test')
+                                expect(page.get_by_role('link',name='원본 MBOX',exact=True)).to_have_count(2)
+                                expect(page.get_by_role('link',name='첨부: ../../CON.txt',exact=True)).to_have_count(1)
+                                page.locator('#tab-approval').click()
+                                page.locator('#reset').click()
+                                expect(page.locator('article')).to_have_count(2)
+                                self.assertEqual(page.locator('body').evaluate('node=>getComputedStyle(node).fontSize'),'12px')
+                                page.close()
+                    finally:browser.close()
+            finally:viewer.close()
+
     def fixture(self, root, approvals=True):
         (root/'index.html').write_text('Old search page', encoding='utf-8')
         (root/'mail').mkdir()
@@ -65,7 +186,7 @@ class SearchPageTests(unittest.TestCase):
                 viewer=Viewer(root)
                 viewer.close()
             updated=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
-            self.assertEqual(updated['browser_index'],'offline-search/3')
+            self.assertEqual(updated['browser_index'],'offline-search/4')
             self.assertEqual(updated['files']['mail/original.mbox'],old['files']['mail/original.mbox'])
             self.assertEqual(digest_file(root/'catalog.sqlite3'),old['files']['catalog.sqlite3'])
             self.assertTrue(verify_archive(root)['ok'])
