@@ -46,7 +46,7 @@ class MailSnapshotTests(unittest.TestCase):
                     with (mail/'a.mbox').open('ab') as stream:stream.write(b'new incoming mail\n')
                 return info
             with patch.object(worker,'copy_mail_file',side_effect=copying):
-                worker.copy_mail(str(root/'{user}'),'employee',str(output),manifest,lambda:None)
+                worker.copy_mail((root/'{user}').as_posix(),'employee',str(output),manifest,lambda:None)
             self.assertEqual(copied,['a.mbox','b.mbox','a.mbox'])
             self.assert_intact(mail,output,manifest)
 
@@ -65,7 +65,7 @@ class MailSnapshotTests(unittest.TestCase):
                     (mail/'new.mbox').write_bytes(b'new complete message\n')
                 return original(path)
             with patch.object(worker,'inventory',side_effect=listing):
-                worker.copy_mail(str(root/'{user}'),'employee',str(output),manifest,lambda:None)
+                worker.copy_mail((root/'{user}').as_posix(),'employee',str(output),manifest,lambda:None)
             self.assert_intact(mail,output,manifest)
             self.assertEqual(len(list((output/'mail/raw').iterdir())),2)
 
@@ -83,7 +83,7 @@ class MailSnapshotTests(unittest.TestCase):
                 return result
             with patch.object(worker,'copy_mail_file',side_effect=copying):
                 with self.assertRaisesRegex(worker.SafeError,'mail_changed_retry'):
-                    worker.copy_mail(str(root/'{user}'),'employee',str(output),manifest,lambda:None)
+                    worker.copy_mail((root/'{user}').as_posix(),'employee',str(output),manifest,lambda:None)
             self.assertEqual(copies.count('a.mbox'),3)
             self.assertEqual(copies.count('b.mbox'),1)
             self.assertFalse((output/'mail/sources.json').exists())
@@ -95,11 +95,11 @@ class MailSnapshotTests(unittest.TestCase):
             mail,output,manifest=self.fixture(root)
             def cancelled():raise worker.SafeError('cancelled')
             with self.assertRaisesRegex(worker.SafeError,'cancelled'):
-                worker.copy_mail(str(root/'{user}'),'employee',str(output),manifest,cancelled)
+                worker.copy_mail((root/'{user}').as_posix(),'employee',str(output),manifest,cancelled)
             if os.name!='nt':
                 (mail/'linked').symlink_to(root/'PRIVATE')
                 with self.assertRaisesRegex(worker.SafeError,'mail_unsafe_file'):
-                    worker.copy_mail(str(root/'{user}'),'employee',str(output),manifest,lambda:None)
+                    worker.copy_mail((root/'{user}').as_posix(),'employee',str(output),manifest,lambda:None)
             self.assertFalse((output/'mail/sources.json').exists())
 
     def test_real_legacy_python_mail_retry_and_zip_progress(self):
