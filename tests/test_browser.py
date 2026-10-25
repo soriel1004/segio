@@ -99,6 +99,8 @@ class WindowsStartupTests(unittest.TestCase):
                 self.assertFalse(any(widget.winfo_class()=='TCombobox' for widget in descendants(app)))
                 self.assertTrue(app.ssh_form.winfo_ismapped())
                 self.assertTrue(app.ssh_options.winfo_ismapped())
+                self.assertTrue(app.check_button.winfo_ismapped())
+                self.assertEqual(app.check_button.cget('text'),'SSH 연결 확인')
                 self.assertEqual(app.ssh_host.get(),'192.168.0.100')
                 self.assertEqual(app.ssh_port.get(),'22')
                 self.assertEqual(app.ssh_user.get(),'root')

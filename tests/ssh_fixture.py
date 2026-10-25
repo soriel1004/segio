@@ -109,6 +109,17 @@ class Access(paramiko.ServerInterface):
             import remote_ssh_export as helper
             try:
                 args=shlex.split(command.decode())
+                if len(args)==8 and args[1]=='-c':
+                    import subprocess,sys
+                    from segio_archive.ssh_client import CHECK_SCRIPT
+                    assert args[2]==CHECK_SCRIPT
+                    paths=[str(self.owner.root/'jobs') if value=='/tmp' else
+                           str(self.owner.path(value)) if value else '' for value in args[3:]]
+                    payload=subprocess.check_output([sys.executable,'-c',CHECK_SCRIPT]+paths)
+                    self.owner.probes+=1
+                    channel.sendall(payload)
+                    channel.send_exit_status(0)
+                    return
                 assert args[2]=='--root' and args[4]=='--action'
                 root=self.owner.path(args[3])
                 action=args[5]
@@ -150,6 +161,7 @@ class SSHServer:
         (self.root/'jobs').mkdir(exist_ok=True)
         self.key=key or paramiko.RSAKey.generate(2048)
         self.reads,self.actions,self.transports=[],[],[]
+        self.probes=0
         self.listener=socket.socket()
         self.listener.bind(('127.0.0.1',0))
         self.port=self.listener.getsockname()[1]

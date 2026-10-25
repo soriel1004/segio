@@ -34,6 +34,44 @@ class SSHArchiveTests(unittest.TestCase):
             mail_template='/files/home/{initial}/{user}/mbox',known_hosts=root/'known_hosts')
         return server,config,original
 
+    def test_connection_check_needs_no_employee_id_and_never_prepares_or_uploads_a_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()
+            server,config,_=self.fixture(root)
+            executable=root/'psql'
+            executable.write_bytes(b'fixture executable access only')
+            executable.chmod(0o700)
+            config.psql='/files/psql'
+            config.username=''
+            collector=SSHCollector(config,confirm_host=lambda *_:True)
+            result=collector.check_connection('SYNTHETIC_SSH_PASSWORD')
+            self.assertTrue(result['ready'])
+            self.assertIsNone(result['checks']['mail_readable'])
+            self.assertTrue(result['checks']['database_config_readable'])
+            config.username='employee'
+            self.assertTrue(collector.check_connection('SYNTHETIC_SSH_PASSWORD')['checks']['mail_readable'])
+            config.psql='/files/missing-psql'
+            failed=collector.check_connection('SYNTHETIC_SSH_PASSWORD')
+            self.assertFalse(failed['ready'])
+            self.assertFalse(failed['checks']['psql_executable'])
+            self.assertEqual(server.probes,3)
+            self.assertEqual(server.actions,[])
+            self.assertEqual(list((root/'jobs').iterdir()),[])
+            self.assertIsNone(collector.client)
+            self.assertIsNone(collector.sftp)
+            self.assertNotIn('SYNTHETIC_SSH_PASSWORD',json.dumps(result))
+            with self.assertRaisesRegex(CollectionError,'SSH_AUTH_FAILED'):
+                collector.check_connection('WRONG_PRIVATE_PASSWORD')
+            original_connect=collector.connect
+            def connected_then_cancelled(password):
+                original_connect(password)
+                config.cancel.set()
+            with patch.object(collector,'connect',side_effect=connected_then_cancelled):
+                with self.assertRaises(Cancelled):
+                    collector.check_connection('SYNTHETIC_SSH_PASSWORD')
+            self.assertEqual(server.probes,3)
+            self.assertEqual(server.actions,[])
+
     def test_ssh_db_and_whole_mbox_export_is_searchable_without_web_or_mail_copy_on_server(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve()
@@ -203,6 +241,53 @@ class SSHArchiveTests(unittest.TestCase):
 
 
 class CompactMailTests(unittest.TestCase):
+    def test_ssh_hash_snapshot_retries_new_files_and_reuses_stable_hashes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()
+            mailbox=root/'home/e/employee/mbox'
+            mailbox.mkdir(parents=True)
+            for name in ('a.mbox','b.mbox'):
+                (mailbox/name).write_bytes(b'From fixture\nSubject: '+name.encode()+b'\n\nbody\n')
+            request={'user':'employee','mail_template':(root/'home/{initial}/{user}/mbox').as_posix()}
+            calls,progress=[],[]
+            original=helper.hash_file
+            def changing(path,*args,**kwargs):
+                calls.append(Path(path).name)
+                value=original(path,*args,**kwargs)
+                if not (mailbox/'z.mbox').exists():
+                    (mailbox/'z.mbox').write_bytes(b'From fixture\nSubject: New arrival\n\nbody\n')
+                return value
+            with patch.object(helper,'hash_file',side_effect=changing):
+                sources,transfers,identities=helper.mail_snapshot(request,lambda state,**fields:progress.append(fields))
+            self.assertEqual({source['name'] for source in sources},{'a.mbox','b.mbox','z.mbox'})
+            self.assertEqual(calls.count('a.mbox'),1)
+            self.assertEqual(calls.count('b.mbox'),1)
+            self.assertEqual(len(transfers),3)
+            self.assertEqual(len(identities),3)
+            self.assertEqual(progress[-1]['attempt'],2)
+            self.assertEqual(progress[-1]['completed_bytes'],sum(source['bytes'] for source in sources))
+            self.assertEqual(progress[-1]['files_done'],3)
+            self.assertEqual(sorted(p.name for p in mailbox.iterdir()),['a.mbox','b.mbox','z.mbox'])
+
+    def test_ssh_hash_snapshot_refuses_mail_that_changes_on_every_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()
+            mailbox=root/'home/e/employee/mbox'
+            mailbox.mkdir(parents=True)
+            (mailbox/'inbox.mbox').write_bytes(b'From fixture\nSubject: Growing\n\nbody\n')
+            request={'user':'employee','mail_template':(root/'home/{initial}/{user}/mbox').as_posix()}
+            original=helper.hash_file
+            calls=[]
+            def changing(path,*args,**kwargs):
+                calls.append(path)
+                value=original(path,*args,**kwargs)
+                with open(path,'ab') as stream:stream.write(b'another arrival\n')
+                return value
+            with patch.object(helper,'hash_file',side_effect=changing):
+                with self.assertRaisesRegex(helper.SafeError,'mail_changed_retry'):
+                    helper.mail_snapshot(request,lambda *args,**kwargs:None)
+            self.assertEqual(len(calls),3)
+
     def test_mbox_delimiter_split_between_chunks_is_indexed_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'large.mbox'

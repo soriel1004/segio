@@ -10,6 +10,7 @@ import struct
 
 sys.path.insert(0, sys.argv[1])
 import live_export_worker as worker
+import remote_ssh_export as ssh
 
 root = tempfile.mkdtemp()
 try:
@@ -68,6 +69,15 @@ try:
     assert packed.testzip() is None
     assert packed.read('large.mbox') == b'x' * 8192
     packed.close()
+    progress=[]
+    sources,transfers,identities=ssh.mail_snapshot(
+        {'user':'employee','mail_template':os.path.join(root,'{user}')},
+        lambda state,**fields:progress.append(fields))
+    assert len(sources)==len(transfers)==len(identities)==1
+    assert sources[0]['sha256']==hashlib.sha256(data).hexdigest()
+    assert progress[-1]['completed_bytes']==len(data)
+    assert progress[-1]['files_done']==1
+    print('LEGACY_SSH_OK')
     print('LEGACY_MAIL_OK')
 finally:
     shutil.rmtree(root)

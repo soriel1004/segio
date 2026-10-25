@@ -25,6 +25,7 @@ class App(tk.Tk):
         self.cancel_event = threading.Event()
         self.running = False
         self.local_conversion = False
+        self.connection_check = False
         self.last_archive = None
         self.viewer = None
         self.user = tk.StringVar()
@@ -82,6 +83,8 @@ class App(tk.Tk):
         self.start_button.pack(side="left")
         self.stop_button = ttk.Button(actions, text="중단", state="disabled", command=self.stop)
         self.stop_button.pack(side="left", padx=8)
+        self.check_button=ttk.Button(actions,text='SSH 연결 확인',command=self.check_connection)
+        self.check_button.pack(side='left',padx=(0,8))
         ttk.Button(actions, text="보관함 열기", command=self.open_archive).pack(side="left", padx=8)
         ttk.Button(actions, text="파일 무결성 검증", command=self.verify).pack(side="left")
         ttk.Button(actions, text="기존 백업 갱신", command=self.open_archive).pack(side="left", padx=8)
@@ -110,19 +113,56 @@ class App(tk.Tk):
                 return False
         return result.get('accepted',False)
 
+    def ssh_config(self):
+        from .ssh_client import SSHConfig
+        return SSHConfig(host=self.ssh_host.get().strip(),port=int(self.ssh_port.get()),
+            ssh_user=self.ssh_user.get().strip(),username=self.user.get().strip(),output=Path(self.folder.get()),
+            key_file=self.ssh_key.get().strip(),approvals=self.approvals.get(),mail=self.mail.get(),
+            make_zip=self.make_zip.get(),resume=self.resume.get(),cancel=self.cancel_event)
+
+    def check_connection(self):
+        if self.running:
+            return
+        self.cancel_event=threading.Event()
+        try:
+            config=self.ssh_config()
+            config.validate(for_backup=False)
+            password=self.ssh_password.get()
+            if not password and not config.key_file:
+                raise ValueError('서버 SSH 암호 또는 개인키 파일을 입력하세요.')
+        except Exception as exc:
+            return messagebox.showerror('입력 확인',str(exc))
+        self.running=self.connection_check=True
+        self.local_conversion=False
+        self.start_button.config(state='disabled')
+        self.check_button.config(state='disabled')
+        self.stop_button.config(state='normal')
+        self.progress.start()
+        self.status.set('SSH 로그인·SFTP와 서버 파일 접근을 확인합니다.')
+        threading.Thread(target=self.connection_worker,args=(config,password),daemon=True).start()
+
+    def connection_worker(self,config,password):
+        from .ssh_client import SSHCollector
+        try:
+            result=SSHCollector(config,confirm_host=self.confirm_host).check_connection(password)
+            self.events.put(('connection_ready',result))
+        except CollectionError as exc:
+            self.events.put(('connection_error',str(exc)))
+        except Exception as exc:
+            self.events.put(('connection_error','SSH 연결 확인 중 오류가 발생했습니다. ['+type(exc).__name__+']'))
+        finally:
+            password=''
+
     def start(self):
         if self.running:
             return
         self.local_conversion = False
+        self.connection_check = False
         if not self.approvals.get() and not self.mail.get():
             return messagebox.showerror("선택 필요", "결재 문서 또는 메일을 선택하세요.")
         self.cancel_event = threading.Event()
         try:
-            from .ssh_client import SSHConfig
-            config=SSHConfig(host=self.ssh_host.get().strip(),port=int(self.ssh_port.get()),
-                ssh_user=self.ssh_user.get().strip(),username=self.user.get().strip(),output=Path(self.folder.get()),
-                key_file=self.ssh_key.get().strip(),approvals=self.approvals.get(),mail=self.mail.get(),
-                make_zip=self.make_zip.get(),resume=self.resume.get(),cancel=self.cancel_event)
+            config=self.ssh_config()
             password=self.ssh_password.get()
             if not password and not config.key_file:
                 raise ValueError('서버 SSH 암호 또는 개인키 파일을 입력하세요.')
@@ -132,6 +172,7 @@ class App(tk.Tk):
         self.ssh_password.set('')
         self.running = True
         self.start_button.config(state="disabled")
+        self.check_button.config(state='disabled')
         self.stop_button.config(state="normal")
         self.progress.start()
         self.status.set('SSH로 수집 중입니다. 처음 접속하면 서버 지문을 확인해 주세요.')
@@ -166,12 +207,29 @@ class App(tk.Tk):
                             f'서버: {host}\n종류: {algorithm}\n지문: {fingerprint}\n\n서버 관리자에게 확인한 지문과 일치하면 저장하고 연결합니다. 계속할까요?',parent=self)
                     finally:
                         ready.set()
-                elif event in {"done", "error", "archive_ready", "archive_error"}:
+                elif event in {"done", "error", "archive_ready", "archive_error", 'connection_ready','connection_error'}:
                     self.running = False
                     self.progress.stop()
                     self.start_button.config(state="normal")
+                    self.check_button.config(state='normal')
                     self.stop_button.config(state="disabled")
-                    if event == 'archive_ready':
+                    self.connection_check=False
+                    if event=='connection_ready':
+                        labels={'python_compatible':'Python 버전','runtime_modules':'Python 필수 모듈','database_config_readable':'DB 설정 파일 읽기',
+                            'cell_readable':'자료 폴더 읽기','psql_executable':'psql 실행','work_directory_writable':'임시 폴더 쓰기',
+                            'mail_readable':'직원 메일 경로 읽기'}
+                        lines=['SSH 로그인 및 SFTP 연결: 정상','서버 Python: '+'.'.join(map(str,value['python_version']))]
+                        lines.extend(label+': '+('정상' if value['checks'].get(key) else '확인 필요')
+                                     for key,label in labels.items() if value['checks'].get(key) is not None)
+                        if value['checks'].get('mail_readable') is None:
+                            lines.append('메일 경로: 메일 선택·직원 ID 입력 후 확인합니다.')
+                        lines.append('DB 접속·자료 추출은 수집 시작 시 확인합니다.')
+                        self.status.set('SSH 연결 확인 완료' if value['ready'] else 'SSH 연결 정상 · 파일 접근 항목을 확인하세요.')
+                        (messagebox.showinfo if value['ready'] else messagebox.showwarning)('SSH 연결 확인','\n'.join(lines))
+                    elif event=='connection_error':
+                        self.status.set(value)
+                        messagebox.showerror('SSH 연결 확인',value)
+                    elif event == 'archive_ready':
                         self.last_archive=value
                         self.status.set('메일 바로보기 준비 완료 · 이제 프로그램을 종료해도 index.html에서 열람할 수 있습니다.')
                         webbrowser.open((value/'index.html').as_uri())
@@ -196,6 +254,9 @@ class App(tk.Tk):
 
     def stop(self):
         self.cancel_event.set()
+        if self.connection_check:
+            self.status.set('SSH 연결 확인을 중단합니다.')
+            return
         if self.local_conversion:
             self.status.set('메일 변환을 중단합니다. 완료한 메일은 다음 갱신에서 재사용합니다.')
             return
@@ -217,9 +278,11 @@ class App(tk.Tk):
                     manifest=json.loads((path/'manifest.json').read_text(encoding='utf-8'))
                     if manifest.get('viewer')=='sqlite-mail/1':
                         self.local_conversion=True
+                        self.connection_check=False
                         self.running=True
                         self.cancel_event=threading.Event()
                         self.start_button.config(state='disabled')
+                        self.check_button.config(state='disabled')
                         self.stop_button.config(state='normal')
                         self.progress.start()
                         self.status.set('기존 백업의 메일 본문·첨부를 바로보기 파일로 변환합니다. 서버 접속 없이 진행합니다.')

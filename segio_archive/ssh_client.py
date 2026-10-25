@@ -25,6 +25,25 @@ from .db_client import DBCollector, publish_local, safe_member
 from .web import Cancelled, CollectionError
 
 PROTOCOL = 'segio-ssh-archive/1'
+CHECK_PROTOCOL = 'segio-ssh-check/1'
+CHECK_SCRIPT = '''import json,os,sys
+config,cell,psql,mail,work=sys.argv[1:]
+try:
+ import hashlib,zipfile,zlib
+ modules=True
+except ImportError:
+ modules=False
+checks={'python_compatible':sys.version_info[:2]>=(2,6),
+ 'runtime_modules':modules,
+ 'database_config_readable':os.path.isfile(config) and os.access(config,os.R_OK),
+ 'cell_readable':os.path.isdir(cell) and os.access(cell,os.R_OK|os.X_OK),
+ 'psql_executable':os.path.isfile(psql) and os.access(psql,os.X_OK),
+ 'work_directory_writable':os.path.isdir(work) and os.access(work,os.W_OK|os.X_OK),
+ 'mail_readable':(os.path.exists(mail) and os.access(mail,os.R_OK|(os.X_OK if os.path.isdir(mail) else 0))) if mail else None}
+ready=all(value is not False for value in checks.values())
+print(json.dumps({'protocol':'segio-ssh-check/1','ok':True,'ready':ready,
+ 'python_version':list(sys.version_info[:3]),'checks':checks}))
+'''
 TOOLS = ('remote_ssh_export.py','live_export_worker.py','export_approval_db.py',
          'export_schema_from_segio_config.py','approval_db_columns.json','db_archive_index.html')
 
@@ -50,15 +69,15 @@ class SSHConfig:
     cancel: threading.Event = field(default_factory=threading.Event,repr=False)
     tools_dir: Path | None = None
 
-    def validate(self):
+    def validate(self, for_backup=True):
         if (not self.host or len(self.host)>253 or re.search(r'[\s/\\\x00-\x1f@]',self.host) or
                 not 1 <= self.port <= 65535):
             raise CollectionError('SSH 서버 주소와 포트를 확인하세요.')
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}',self.ssh_user):
             raise CollectionError('서버의 SSH 계정 이름을 입력하세요.')
-        if not re.fullmatch(r'[A-Za-z0-9_.@-]{1,100}',self.username) or self.username in ('.','..','guest'):
+        if (for_backup or self.username) and (not re.fullmatch(r'[A-Za-z0-9_.@-]{1,100}',self.username) or self.username in ('.','..','guest')):
             raise CollectionError('백업할 직원의 정확한 SEGIO ID를 입력하세요.')
-        if not self.approvals and not self.mail:
+        if for_backup and not self.approvals and not self.mail:
             raise CollectionError('결재 문서 또는 메일을 선택하세요.')
         for path in (self.db_config,self.cell,self.mail_template,self.python,self.psql):
             if not path.startswith('/') or re.search(r'[\x00-\x1f]',path):
@@ -113,14 +132,11 @@ class SSHCollector:
             raise CollectionError('SSH 추출 메타데이터가 너무 큽니다. [SSH_METADATA_LIMIT]')
         return json.loads(data)
 
-    def execute(self,action,detach=False):
-        command = [self.config.python,self.remote+'/remote_ssh_export.py','--root',self.remote,'--action',action]
-        if detach:
-            command.append('--detach')
+    def command(self,command,protocol=PROTOCOL,detach=False,timeout=600):
         channel = self.client.get_transport().open_session(timeout=30)
         try:
             channel.exec_command(' '.join(shlex.quote(arg) for arg in command))
-            output, deadline = bytearray(), time.monotonic()+600
+            output, deadline = bytearray(), time.monotonic()+timeout
             while not channel.exit_status_ready() or channel.recv_ready() or channel.recv_stderr_ready():
                 self.checkpoint()
                 if channel.recv_ready():
@@ -135,11 +151,72 @@ class SSHCollector:
             code = channel.recv_exit_status()
             if detach and not output and code==0:
                 return
-            value = json.loads(output)
-            if value.get('protocol') != PROTOCOL or code or value.get('ok') is not True:
+            try:
+                value = json.loads(output)
+                if not isinstance(value,dict):
+                    raise ValueError()
+            except (ValueError,UnicodeError):
+                raise CollectionError('서버 작업기 응답을 확인하지 못했습니다. 서버 Python 경로와 실행 권한을 확인하세요. [SSH_HELPER_RESPONSE]') from None
+            if value.get('protocol') != protocol or code or value.get('ok') is not True:
                 raise CollectionError(DBCollector.error_message(value.get('error')))
+            return value
         finally:
             channel.close()
+
+    def execute(self,action,detach=False):
+        command = [self.config.python,self.remote+'/remote_ssh_export.py','--root',self.remote,'--action',action]
+        if detach:
+            command.append('--detach')
+        return self.command(command,detach=detach)
+
+    def close_connections(self):
+        for connection in (self.sftp,self.client):
+            if connection:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+        self.sftp=self.client=None
+
+    def check_connection(self,password):
+        """Read-only authentication/readiness check; no upload or export job."""
+        self.config.validate(for_backup=False)
+        try:
+            self.checkpoint()
+            self.connect(password)
+            password=''
+            self.checkpoint()
+            mail=''
+            if self.config.mail and self.config.username:
+                try:
+                    mail=self.config.mail_template.format(initial=self.config.username[0],user=self.config.username)
+                except (ValueError,KeyError):
+                    raise CollectionError('메일 경로 형식을 확인하세요.') from None
+            self.phase='SSH 서버 환경 확인'
+            result=self.command([self.config.python,'-c',CHECK_SCRIPT,self.config.db_config,
+                self.config.cell,self.config.psql,mail,'/tmp'],protocol=CHECK_PROTOCOL,timeout=30)
+            self.checkpoint()
+            checks=result.get('checks')
+            keys=('python_compatible','runtime_modules','database_config_readable','cell_readable',
+                  'psql_executable','work_directory_writable','mail_readable')
+            version=result.get('python_version')
+            if (not isinstance(checks,dict) or any(type(checks.get(key)) is not bool for key in keys[:-1])
+                    or checks.get('mail_readable') not in (True,False,None)
+                    or type(result.get('ready')) is not bool
+                    or not isinstance(version,list) or len(version)!=3 or any(type(n) is not int for n in version)):
+                raise CollectionError('SSH 환경 확인 응답 형식이 올바르지 않습니다. [SSH_HELPER_RESPONSE]')
+            return result
+        except Cancelled:
+            raise Cancelled('SSH 연결 확인을 중단했습니다.') from None
+        except paramiko.BadHostKeyException:
+            raise CollectionError('저장된 SSH 서버 지문과 다릅니다. 관리자에게 확인하세요. [SSH_HOST_KEY_CHANGED]') from None
+        except paramiko.AuthenticationException:
+            raise CollectionError('서버 SSH 계정 인증에 실패했습니다. SSH 암호·개인키를 확인하세요. [SSH_AUTH_FAILED]') from None
+        except (paramiko.SSHException,OSError,socket.timeout):
+            raise CollectionError('SSH 연결 확인에 실패했습니다. 서버 주소·포트·네트워크를 확인하세요. [SSH_CONNECTION_OR_IO]') from None
+        finally:
+            password=''
+            self.close_connections()
 
     def initialize(self,cache):
         state_path = cache/'session.json'
@@ -178,7 +255,7 @@ class SSHCollector:
         self.execute('prepare',detach=True)
 
     def wait_ready(self):
-        previous, deadline = None, time.monotonic()+72*3600
+        previous, deadline, reported = None, time.monotonic()+72*3600, 0.0
         while time.monotonic()<deadline:
             self.checkpoint()
             status = self.read_json(self.remote+'/status.json',65536)
@@ -189,6 +266,11 @@ class SSHCollector:
                 self.log({'initializing':'SSH 서버 작업 준비 중','database':'직원의 결재 DB를 읽기 전용으로 추출하는 중',
                           'mail':'MBOX 원본 목록과 SHA-256을 확인하는 중 · 서버에 메일 복사본을 만들지 않습니다'}.get(stage,'SSH 추출 준비 확인 중'))
                 previous = stage
+            if stage=='mail' and status.get('total_bytes') is not None and time.monotonic()-reported>=2:
+                done,total=status.get('completed_bytes',0),status['total_bytes']
+                self.log(f'서버 메일 검사 {done/1024**3:.2f} / {total/1024**3:.2f} GiB · '
+                         f'{status.get("files_done",0):,} / {status.get("files_total",0):,}개 · 시도 {status.get("attempt",1)} / 3')
+                reported=time.monotonic()
             if status.get('state') == 'failed':
                 raise CollectionError(DBCollector.error_message(status.get('code')))
             if status.get('state') == 'ready':
@@ -338,9 +420,4 @@ class SSHCollector:
             raise CollectionError(self.phase+' 중 처리 오류가 발생했습니다. [SSH_PROCESSING_ERROR]') from None
         finally:
             password=''
-            for connection in (self.sftp,self.client):
-                if connection:
-                    try:
-                        connection.close()
-                    except Exception:
-                        pass
+            self.close_connections()

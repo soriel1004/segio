@@ -109,6 +109,7 @@ class MailSnapshotTests(unittest.TestCase):
                               capture_output=True,text=True,timeout=30,env=dict(os.environ,LC_ALL='C'))
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         self.assertIn('LEGACY_MAIL_OK',result.stdout)
+        self.assertIn('LEGACY_SSH_OK',result.stdout)
 
 
 if __name__=='__main__':unittest.main()
