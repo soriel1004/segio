@@ -244,7 +244,7 @@ class App(tk.Tk):
                             detail = "\n".join(manifest["warnings"][1:][-3:]) or "수집 로그를 확인하세요."
                             messagebox.showerror("수집 실패", detail)
                         else:
-                            messagebox.showinfo("수집 결과", "저장한 보관함에서 수집 범위·실패 내역을 확인하세요.\n이 결과만으로 계정을 삭제해도 된다는 의미는 아닙니다.")
+                            messagebox.showinfo("백업 완료", "백업 완료하였습니다.")
                     else:
                         self.status.set(value)
                         messagebox.showerror("수집 실패", value)
