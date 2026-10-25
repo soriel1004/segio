@@ -8,11 +8,11 @@ Windows에서 **서버 관리자 SSH 계정**으로 접속해 지정 직원의 �
 
 **[SSH 사용 안내](docs/SSH_ARCHIVE.md)** · **[최신 소스 ZIP](https://github.com/soriel1004/segio/archive/refs/heads/main.zip)** · **[Windows 빌드·다운로드](https://github.com/soriel1004/segio/actions)**
 
-**[Windows v0.4.7 직접 다운로드](https://github.com/soriel1004/segio/actions/runs/40193319996/artifacts/12599096459)** (GitHub 로그인 필요). [최종 Actions #46](https://github.com/soriel1004/segio/actions/runs/40193319996)에서 Linux·Windows 시험과 실행 파일 빌드가 통과했습니다.
+**[Windows v0.4.8 직접 다운로드](https://github.com/soriel1004/segio/actions/runs/40241255648/artifacts/12617122934)** (GitHub 로그인 필요). [최종 Actions #47](https://github.com/soriel1004/segio/actions/runs/40241255648)에서 Linux·Windows 시험과 실행 파일 빌드가 통과했습니다.
 
 ## Windows에서 실행
 
-1. GitHub Actions의 최신 **성공한 v0.4.7 이상** 실행에서 `SEGIOArchive-Windows`를 받습니다. GitHub 로그인이 필요합니다. 압축을 모두 풀고 `_internal`, `tools`를 포함한 폴더 전체를 유지합니다.
+1. GitHub Actions의 최신 **성공한 v0.4.8 이상** 실행에서 `SEGIOArchive-Windows`를 받습니다. GitHub 로그인이 필요합니다. 압축을 모두 풀고 `_internal`, `tools`를 포함한 폴더 전체를 유지합니다.
 2. `SEGIOArchive.exe`를 실행하면 SSH 입력 화면이 바로 표시됩니다. 가져오기 방식을 선택할 필요가 없습니다.
 3. SSH 서버 `192.168.0.100`, 포트 `22`, 계정 `root`, **서버 SSH 암호**, 백업할 직원의 **SEGIO ID**, Windows 저장 위치를 입력합니다. 개인키 인증도 지원합니다.
 4. 먼저 **SSH 연결 확인**으로 접속·파일 접근을 확인할 수 있습니다. 직원 ID 없이도 SSH 연결은 검사하며, ID를 입력하면 메일 경로도 확인합니다. **로그인하고 수집 시작**을 누르고 처음 접속하는 서버의 공개 지문을 확인합니다. 지문 확인 방법은 [SSH 안내](docs/SSH_ARCHIVE.md)에 있습니다.
