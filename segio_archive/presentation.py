@@ -1,4 +1,4 @@
-"""Read existing archive metadata for the same cards in file and HTTP views."""
+"""Read existing archive metadata for consistent file and HTTP views."""
 import json
 from pathlib import Path
 import re
@@ -11,10 +11,17 @@ class ArchivePresentation:
             (self.root/'manifest.json').read_text(encoding='utf-8'))
         self.files = self.manifest['files']
         self.approvals = {}
+        self.approval_folders = None
         if 'catalog.json' in self.files:
             for item in json.loads((self.root/'catalog.json').read_text(encoding='utf-8'))['items']:
                 if item.get('kind', 'approval') == 'approval':
                     self.approvals[item['path'] if 'path' in item else item['html']] = item
+
+    def load_approval_folders(self, db):
+        from .approval_folders import ApprovalFolders
+        if self.approval_folders is None:
+            self.approval_folders=ApprovalFolders(self.root,self.manifest,db,self.approvals)
+        return self.approval_folders
 
     def path(self, name):
         from .db_client import safe_member
@@ -34,6 +41,7 @@ class ArchivePresentation:
 
     def details(self, db, items):
         """Enrich one bounded page/chunk without reading MBOX or attachments."""
+        approvals=self.load_approval_folders(db)
         mail_ids = [item['id'] for item in items if item['kind'] == 'mail']
         mail = {}
         if mail_ids and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mail_records'").fetchone():
@@ -43,6 +51,7 @@ class ArchivePresentation:
         for item in items:
             info = {'captured_at': self.manifest.get('finished_at', ''), 'attachments': []}
             if item['kind'] == 'approval':
+                info.update(approvals.info(item['html']))
                 record = self.approvals.get(item['html'], {})
                 info.update(source=record.get('source', ''), document_id=record.get('id', ''),
                             json=self.path(record.get('json')))
@@ -50,6 +59,13 @@ class ArchivePresentation:
                                        for a in record.get('attachments', []) if self.path(a.get('path'))]
             else:
                 info.update(mail.get(item['id'], {}))
+                from email.utils import parsedate_to_datetime
+                value=info.get('date','')
+                try:
+                    parsed=parsedate_to_datetime(value)
+                    info['date_display']=parsed.strftime('%Y-%m-%d %H:%M %z') if parsed.tzinfo else str(value)
+                except (ValueError, TypeError, IndexError, OverflowError):
+                    info['date_display']=str(value)
                 info['raw'] = self.path(info.get('raw'))
                 info['raw_label'] = '원본 MBOX' if info['raw'].endswith('.mbox') else '원본 메일 파일'
                 from .portable_mail import page_path

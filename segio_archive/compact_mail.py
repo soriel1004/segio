@@ -141,10 +141,10 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
     return install_search_page(root, manifest, checkpoint)
 
 
-def search(root: Path, query='', kind='', page=0, mailbox='', version=''):
+def search(root: Path, query='', kind='', page=0, mailbox='', version='', approval_folder=''):
     query = query[:200].replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
     pattern = '%'+query+'%'
-    folder_label="CASE WHEN kind='mail' THEN mailbox_label(folders) ELSE folders END"
+    folder_label="CASE WHEN kind='mail' THEN mailbox_label(folders) ELSE approval_label(html) END"
     where = r"(title LIKE ? ESCAPE '\' OR body LIKE ? ESCAPE '\' OR folders LIKE ? ESCAPE '\' OR "+folder_label+r" LIKE ? ESCAPE '\')"
     parameters = [pattern, pattern, pattern,pattern]
     if kind in ('mail', 'approval'):
@@ -156,6 +156,12 @@ def search(root: Path, query='', kind='', page=0, mailbox='', version=''):
     with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro', uri=True)) as db:
         from .presentation import ArchivePresentation
         presentation=ArchivePresentation(root)
+        approvals=presentation.load_approval_folders(db)
+        db.create_function('approval_label',1,lambda path:approvals.info(path)['approval_label'],deterministic=True)
+        if approval_folder and kind=='approval':
+            db.create_function('approval_in_folder',2,approvals.contains,deterministic=True)
+            where+=' AND approval_in_folder(html,?)'
+            parameters.append(approval_folder)
         if version in ('active','history') and kind=='approval':
             db.create_function('approval_source',1,presentation.approval_source,deterministic=True)
             where+=' AND approval_source(html)=?'
