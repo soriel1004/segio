@@ -35,7 +35,7 @@ class MailSnapshotTests(unittest.TestCase):
 
     def test_changed_file_is_retried_and_unchanged_large_files_reused(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp)
+            root=Path(tmp).resolve()
             mail,output,manifest=self.fixture(root)
             original=worker.copy_mail_file
             copied=[]
@@ -52,7 +52,7 @@ class MailSnapshotTests(unittest.TestCase):
 
     def test_new_deleted_and_renamed_files_are_reconciled_without_stale_copies(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp)
+            root=Path(tmp).resolve()
             mail,output,manifest=self.fixture(root)
             original=worker.inventory
             calls=0
@@ -71,7 +71,7 @@ class MailSnapshotTests(unittest.TestCase):
 
     def test_continuously_changed_mail_stops_after_three_attempts_without_complete_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp)
+            root=Path(tmp).resolve()
             mail,output,manifest=self.fixture(root)
             original=worker.copy_mail_file
             copies=[]
@@ -91,7 +91,7 @@ class MailSnapshotTests(unittest.TestCase):
 
     def test_cancellation_during_copy_and_symlink_sources_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp)
+            root=Path(tmp).resolve()
             mail,output,manifest=self.fixture(root)
             def cancelled():raise worker.SafeError('cancelled')
             with self.assertRaisesRegex(worker.SafeError,'cancelled'):
