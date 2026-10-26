@@ -1,6 +1,7 @@
 """Read-only approval status, personal relationships and draft dates."""
 from datetime import datetime, timedelta, timezone
 import json
+from .dates import approval_timestamp
 
 LABELS = {'complete':'완료문서', 'cancel':'반려문서', 'reference':'참조문서',
           'receive':'수신문서', 'progress':'진행문서', 'draft':'임시문서', 'unknown':'상태 미확인'}
@@ -39,7 +40,7 @@ def describe(payload, user):
                  any(user in members(row.get(key)) for row in sends for key in ('recv_user','recv_uid'))):
         folders.append('receive')
     return {'approval_folders':folders,'approval_label':LABELS[primary],
-            'date_display':draft_date(document.get('wdate'))}
+            'date_display':draft_date(document.get('wdate')),'date_sort':approval_timestamp(document.get('wdate'))}
 
 
 class ApprovalFolders:
@@ -62,7 +63,7 @@ class ApprovalFolders:
                     self.by_path[path]=describe(json.loads(local.read_text(encoding='utf-8')),user)
 
     def info(self,path):
-        return self.by_path.get(path,{'approval_folders':['unknown'],'approval_label':LABELS['unknown'],'date_display':''})
+        return self.by_path.get(path,{'approval_folders':['unknown'],'approval_label':LABELS['unknown'],'date_display':'','date_sort':None})
 
     def contains(self,path,folder):
         return folder in self.info(path)['approval_folders']

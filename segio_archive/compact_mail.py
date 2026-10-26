@@ -160,7 +160,9 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
     return install_search_page(root, manifest, checkpoint,progress=progress)
 
 
-def search(root: Path, query='', kind='', page=0, mailbox='', version='', approval_folder=''):
+def search(root: Path, query='', kind='', page=0, mailbox='', version='', approval_folder='', page_size=100):
+    from .pagination import validate_page_size
+    page_size=validate_page_size(page_size)
     query = query[:200].replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
     pattern = '%'+query+'%'
     folder_label="CASE WHEN kind='mail' THEN mailbox_label(folders) ELSE approval_label(html) END"
@@ -176,6 +178,8 @@ def search(root: Path, query='', kind='', page=0, mailbox='', version='', approv
         from .presentation import ArchivePresentation
         presentation=ArchivePresentation(root)
         approvals=presentation.load_approval_folders(db)
+        from .dates import DateOrder
+        DateOrder(db,approvals)
         db.create_function('approval_label',1,lambda path:approvals.info(path)['approval_label'],deterministic=True)
         if approval_folder and kind=='approval':
             db.create_function('approval_in_folder',2,approvals.contains,deterministic=True)
@@ -189,7 +193,8 @@ def search(root: Path, query='', kind='', page=0, mailbox='', version='', approv
         MailFolders(root).register(db)
         total = db.execute('SELECT count(*) FROM items WHERE '+where, parameters).fetchone()[0]
         rows = db.execute('SELECT id,kind,title,'+folder_label+",html,CASE WHEN kind='mail' THEN mailbox_key(folders) ELSE '' END,folders FROM items WHERE "+where+
-                          ' ORDER BY rowid LIMIT 100 OFFSET ?', parameters+[max(0,min(page,1000000))*100]).fetchall()
+                          ' ORDER BY archive_date(kind,id,html) DESC,rowid ASC LIMIT ? OFFSET ?',
+                          parameters+[page_size,max(0,min(page,1000000))*page_size]).fetchall()
         items=[dict(zip(('id','kind','title','folder','html','folder_id','source_folder'), row)) for row in rows]
         presentation.details(db,items)
     from .portable_mail import page_path

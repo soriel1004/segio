@@ -45,9 +45,11 @@ class ArchivePresentation:
         mail_ids = [item['id'] for item in items if item['kind'] == 'mail']
         mail = {}
         if mail_ids and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mail_records'").fetchone():
-            for row in db.execute('SELECT id,source,sender,receiver,date FROM mail_records WHERE id IN ('+
-                                  ','.join('?' for _ in mail_ids)+')', mail_ids):
-                mail[row[0]] = dict(zip(('raw', 'sender', 'receiver', 'date'), row[1:]))
+            for start in range(0,len(mail_ids),500):
+                batch=mail_ids[start:start+500]
+                for row in db.execute('SELECT id,source,sender,receiver,date FROM mail_records WHERE id IN ('+
+                                      ','.join('?' for _ in batch)+')', batch):
+                    mail[row[0]] = dict(zip(('raw', 'sender', 'receiver', 'date'), row[1:]))
         for item in items:
             info = {'captured_at': self.manifest.get('finished_at', ''), 'attachments': []}
             if item['kind'] == 'approval':
