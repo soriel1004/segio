@@ -14,19 +14,25 @@ from .mail_import import header_text, decode_bytes, PARSE_LIMIT
 from .web import CollectionError
 
 
-def digest_file(path, checkpoint=lambda: None):
+def digest_file(path, checkpoint=lambda: None, progress=None):
     digest, size = hashlib.sha256(), 0
+    total=path.stat().st_size if progress else 0
+    if progress:
+        progress(0,total)
     with path.open('rb') as stream:
         while block := stream.read(1024 * 1024):
             checkpoint()
             digest.update(block)
             size += len(block)
+            if progress:
+                progress(size,total)
     return {'bytes': size, 'sha256': digest.hexdigest()}
 
 
-def mbox_spans(path, checkpoint=lambda: None):
+def mbox_spans(path, checkpoint=lambda: None, progress=None):
     """Scan bounded chunks, including delimiters straddling chunk boundaries."""
     with path.open('rb') as scanner, path.open('rb') as envelopes:
+        total=path.stat().st_size if progress else 0
         first = envelopes.readline(65537)
         if not first:
             return
@@ -47,6 +53,8 @@ def mbox_spans(path, checkpoint=lambda: None):
                 start = boundary + len(envelope)
                 offset = found + 6
             position += len(block)
+            if progress:
+                progress(position,total)
             carry = data[-5:]
         if position > start:
             yield start, position
@@ -63,7 +71,10 @@ def read_headers(stream, start, end):
     return BytesHeaderParser(policy=policy.compat32).parsebytes(bytes(header))
 
 
-def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=lambda _: None):
+def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=lambda _: None, progress=None):
+    from .progress import Reporter
+    report=Reporter(progress)
+    report('catalog',detail='결재 DB 색인 준비',force=True)
     from .db_client import safe_member
     manifest = json.loads((root/'manifest.json').read_text(encoding='utf-8'))
     if manifest.get('user') != user or manifest.get('ssh_export', {}).get('authentication') != 'administrator_ssh':
@@ -80,7 +91,8 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
         db.execute('CREATE TABLE document_records (id TEXT PRIMARY KEY, payload TEXT)')
         db.execute('CREATE TABLE mail_records (id TEXT PRIMARY KEY, source TEXT, begin INTEGER, end INTEGER, sender TEXT, receiver TEXT, date TEXT)')
         catalog = json.loads((root/'catalog.json').read_text(encoding='utf-8'))
-        for item in catalog['items']:
+        report('catalog',0,len(catalog['items']),'records','결재 DB 색인')
+        for number,item in enumerate(catalog['items'],1):
             checkpoint()
             for name in (item['path'], item['json']):
                 safe_member(name)
@@ -90,6 +102,10 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
                        ('approval-'+item['id'], 'approval', item['title'], '결재 문서', item['search'], item['path']))
             db.execute('INSERT INTO document_records VALUES (?,?)',
                        ('approval-'+item['id'], (root/item['json']).read_text(encoding='utf-8')))
+            report('catalog',number,len(catalog['items']),'records','결재 DB 색인')
+        total_bytes=sum(source['bytes'] for source in sources['sources'] if source.get('format') in ('mbox','rfc822'))
+        indexed_bytes=0
+        report('catalog',0,total_bytes,'bytes','메일 제목 색인 · 원본 바이트 기준',force=True)
         for source in sources['sources']:
             checkpoint()
             name = source['path']
@@ -100,7 +116,7 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
             path = root/name
             kind = source.get('format')
             if kind == 'mbox':
-                spans = mbox_spans(path, checkpoint)
+                spans = mbox_spans(path, checkpoint,lambda done,total:report('catalog',indexed_bytes+done,total_bytes,'bytes',f'메일 제목 색인 {mail_count:,}건 · 원본 바이트 기준'))
             elif kind == 'rfc822':
                 spans = [(0, source['bytes'])]
             else:
@@ -121,6 +137,8 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
                     if mail_count % 1000 == 0:
                         db.commit()
                         log(f'메일 제목 색인 {mail_count:,}건')
+            indexed_bytes+=source['bytes']
+            report('catalog',indexed_bytes,total_bytes,'bytes',f'메일 제목 색인 {mail_count:,}건 · 원본 바이트 기준')
         db.execute('CREATE INDEX title_index ON items(kind,title)')
         db.commit()
     temporary.replace(database)
@@ -135,10 +153,11 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
     if issue_count:
         manifest['warnings'].append(f'인식하지 못한 메일 원본 파일 {issue_count}개는 원본 그대로 보존했습니다.')
     files['catalog.sqlite3'] = digest_file(database, checkpoint)
+    report('catalog',indexed_bytes,total_bytes,'bytes',f'검색 DB 생성 완료 · 메일 {mail_count:,}건',force=True)
     from .portable_mail import build_portable_mail
-    manifest=build_portable_mail(root,manifest,checkpoint,log)
+    manifest=build_portable_mail(root,manifest,checkpoint,log,progress=progress)
     from .search_page import install_search_page
-    return install_search_page(root, manifest, checkpoint)
+    return install_search_page(root, manifest, checkpoint,progress=progress)
 
 
 def search(root: Path, query='', kind='', page=0, mailbox='', version='', approval_folder=''):

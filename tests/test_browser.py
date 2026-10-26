@@ -100,6 +100,8 @@ class WindowsStartupTests(unittest.TestCase):
                 self.assertTrue(app.ssh_form.winfo_ismapped())
                 self.assertTrue(app.ssh_options.winfo_ismapped())
                 self.assertTrue(app.check_button.winfo_ismapped())
+                self.assertTrue(app.overall_progress.winfo_ismapped())
+                self.assertTrue(app.progress.winfo_ismapped())
                 self.assertEqual(app.check_button.cget('text'),'SSH 연결 확인')
                 self.assertEqual(app.ssh_host.get(),'192.168.0.100')
                 self.assertEqual(app.ssh_port.get(),'22')
@@ -113,3 +115,40 @@ class WindowsStartupTests(unittest.TestCase):
                 launch.assert_not_called()
             finally:
                 app.close()
+
+    def test_progress_queue_updates_bars_and_elapsed_time_without_blocking_tk(self):
+        from segio_archive.gui import App
+        app=App()
+        clock=[0]
+        app.progress_state.clock=lambda:clock[0]
+        try:
+            app.running=True
+            app.begin_progress('backup')
+            self.assertEqual(str(app.progress.cget('mode')),'indeterminate')
+            app.events.put(('progress',dict(stage='transfer',completed=1024**3,total=2*1024**3,unit='bytes',detail='SFTP 전송 중')))
+            app.poll()
+            app.update()
+            self.assertEqual(str(app.progress.cget('mode')),'determinate')
+            self.assertEqual(float(app.progress.cget('value')),50)
+            self.assertEqual(float(app.overall_progress.cget('value')),30)
+            self.assertIn('SFTP',app.progress_stage.get())
+            clock[0]=65
+            app.poll()
+            self.assertEqual(app.progress_elapsed.get(),'전체 경과 00:01:05 · 현재 단계 00:01:05')
+            app.events.put(('progress',dict(stage='mail',completed=3,total=10,unit='messages',detail='본문·첨부 처리')))
+            app.poll()
+            self.assertEqual(float(app.progress.cget('value')),30)
+            clock[0]=70
+            app.poll()
+            self.assertEqual(app.progress_elapsed.get(),'전체 경과 00:01:10 · 현재 단계 00:00:05')
+            app.running=False
+            app.cancel_event.set()
+            app.finish_progress(False)
+            elapsed=app.progress_elapsed.get()
+            clock[0]=100
+            app.render_progress()
+            self.assertEqual(app.progress_elapsed.get(),elapsed)
+            self.assertLess(float(app.overall_progress.cget('value')),100)
+        finally:
+            app.running=False
+            app.close()

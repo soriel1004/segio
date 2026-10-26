@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 from .archive import verify_archive, STATES
 from .web import CollectionError
 from . import __version__
+from .progress import ProgressState
 
 APP_TITLE = "그룹웨어 문서 및 메일 백업 및 검색"
 
@@ -19,8 +20,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE + " · v" + __version__)
-        self.geometry("890x820")
-        self.minsize(800, 700)
+        self.geometry('940x'+str(min(900,max(700,self.winfo_screenheight()-80))))
+        self.minsize(820, 700)
         self.events = queue.Queue()
         self.cancel_event = threading.Event()
         self.running = False
@@ -41,6 +42,12 @@ class App(tk.Tk):
         self.mail = tk.BooleanVar(value=True)
         self.pdf = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="서버에 연결하기 전입니다.")
+        self.progress_state=ProgressState()
+        self.progress_mode=None
+        self.progress_stage=tk.StringVar(value='백업 시작 대기')
+        self.progress_detail=tk.StringVar(value='SFTP 전송·메일 바로보기 등의 처리량을 표시합니다.')
+        self.progress_elapsed=tk.StringVar(value='전체 경과 00:00:00 · 현재 단계 00:00:00')
+        self.overall_label=tk.StringVar(value='전체 단계 진행 · 시작 전')
         self.build()
         self.after(100, self.poll)
         self.protocol("WM_DELETE_WINDOW", self.close)
@@ -89,9 +96,17 @@ class App(tk.Tk):
         ttk.Button(actions, text="파일 무결성 검증", command=self.verify).pack(side="left")
         ttk.Button(actions, text="기존 백업 갱신", command=self.open_archive).pack(side="left", padx=8)
         ttk.Label(panel, textvariable=self.status, wraplength=770).pack(anchor="w", pady=(14, 6))
-        self.progress = ttk.Progressbar(panel, mode="indeterminate")
-        self.progress.pack(fill="x", pady=(0, 8))
-        self.log_text = tk.Text(panel, height=7, wrap="word", state="disabled")
+        progress_panel=ttk.LabelFrame(panel,text='백업 진행 상황',padding=10)
+        progress_panel.pack(fill='x',pady=(0,8))
+        ttk.Label(progress_panel,textvariable=self.progress_stage,wraplength=770).pack(anchor='w')
+        ttk.Label(progress_panel,textvariable=self.overall_label).pack(anchor='w',pady=(4,0))
+        self.overall_progress=ttk.Progressbar(progress_panel,mode='determinate',maximum=100)
+        self.overall_progress.pack(fill='x',pady=(2,5))
+        ttk.Label(progress_panel,textvariable=self.progress_detail,wraplength=770).pack(anchor='w')
+        self.progress = ttk.Progressbar(progress_panel,mode='determinate',maximum=100)
+        self.progress.pack(fill="x", pady=(2,5))
+        ttk.Label(progress_panel,textvariable=self.progress_elapsed).pack(anchor='w')
+        self.log_text = tk.Text(panel, height=4, wrap="word", state="disabled")
         self.log_text.pack(fill="both", expand=True)
         ttk.Label(panel, text="수집 후 오프라인 열람·누락 대조를 수행하세요. 계정 삭제 영향 시험과 서버 전체 백업은 별도입니다.", wraplength=770).pack(anchor="w", pady=(10, 0))
 
@@ -104,6 +119,33 @@ class App(tk.Tk):
         value=filedialog.askopenfilename(title='서버 SSH 개인키 파일')
         if value:
             self.ssh_key.set(value)
+
+    def begin_progress(self,mode,make_zip=False):
+        self.progress_state.begin(mode,make_zip)
+        self.render_progress()
+
+    def finish_progress(self,success):
+        self.progress_state.finish(success,self.cancel_event.is_set())
+        self.render_progress()
+
+    def render_progress(self):
+        if self.progress_state.started is None:
+            return
+        view=self.progress_state.view()
+        self.progress_stage.set(view['stage'])
+        self.progress_detail.set(view['detail'])
+        self.progress_elapsed.set(view['elapsed'])
+        self.overall_label.set(view['overall_text'])
+        self.overall_progress.config(value=view['overall'])
+        mode='indeterminate' if view['current'] is None and self.running else 'determinate'
+        if self.progress_mode!=mode:
+            self.progress.stop()
+            self.progress.config(mode=mode)
+            if mode=='indeterminate':
+                self.progress.start(15)
+            self.progress_mode=mode
+        if mode=='determinate':
+            self.progress.config(value=view['current'] or 0)
 
     def confirm_host(self,host,algorithm,fingerprint):
         ready,result=threading.Event(),{}
@@ -137,14 +179,15 @@ class App(tk.Tk):
         self.start_button.config(state='disabled')
         self.check_button.config(state='disabled')
         self.stop_button.config(state='normal')
-        self.progress.start()
+        self.begin_progress('check')
         self.status.set('SSH 로그인·SFTP와 서버 파일 접근을 확인합니다.')
         threading.Thread(target=self.connection_worker,args=(config,password),daemon=True).start()
 
     def connection_worker(self,config,password):
         from .ssh_client import SSHCollector
         try:
-            result=SSHCollector(config,confirm_host=self.confirm_host).check_connection(password)
+            result=SSHCollector(config,confirm_host=self.confirm_host,
+                progress=lambda value:self.events.put(('progress',value))).check_connection(password)
             self.events.put(('connection_ready',result))
         except CollectionError as exc:
             self.events.put(('connection_error',str(exc)))
@@ -174,14 +217,15 @@ class App(tk.Tk):
         self.start_button.config(state="disabled")
         self.check_button.config(state='disabled')
         self.stop_button.config(state="normal")
-        self.progress.start()
+        self.begin_progress('backup',config.make_zip)
         self.status.set('SSH로 수집 중입니다. 처음 접속하면 서버 지문을 확인해 주세요.')
         threading.Thread(target=self.worker, args=(config, password), daemon=True).start()
 
     def worker(self, config, password):
         try:
             from .ssh_client import SSHCollector
-            collector=SSHCollector(config,lambda s:self.events.put(('log',s)),self.confirm_host)
+            collector=SSHCollector(config,lambda s:self.events.put(('log',s)),self.confirm_host,
+                progress=lambda value:self.events.put(('progress',value)))
             path = collector.run(password)
             self.events.put(("done", path))
         except CollectionError as exc:
@@ -195,7 +239,9 @@ class App(tk.Tk):
         try:
             while True:
                 event, value = self.events.get_nowait()
-                if event == "log":
+                if event=='progress':
+                    self.progress_state.update(value)
+                elif event == "log":
                     self.log_text.config(state="normal")
                     self.log_text.insert("end", value + "\n")
                     self.log_text.see("end")
@@ -209,12 +255,12 @@ class App(tk.Tk):
                         ready.set()
                 elif event in {"done", "error", "archive_ready", "archive_error", 'connection_ready','connection_error'}:
                     self.running = False
-                    self.progress.stop()
                     self.start_button.config(state="normal")
                     self.check_button.config(state='normal')
                     self.stop_button.config(state="disabled")
                     self.connection_check=False
                     if event=='connection_ready':
+                        self.finish_progress(value['ready'])
                         labels={'python_compatible':'Python 버전','runtime_modules':'Python 필수 모듈','database_config_readable':'DB 설정 파일 읽기',
                             'cell_readable':'자료 폴더 읽기','psql_executable':'psql 실행','work_directory_writable':'임시 폴더 쓰기',
                             'mail_readable':'직원 메일 경로 읽기'}
@@ -227,18 +273,22 @@ class App(tk.Tk):
                         self.status.set('SSH 연결 확인 완료' if value['ready'] else 'SSH 연결 정상 · 파일 접근 항목을 확인하세요.')
                         (messagebox.showinfo if value['ready'] else messagebox.showwarning)('SSH 연결 확인','\n'.join(lines))
                     elif event=='connection_error':
+                        self.finish_progress(False)
                         self.status.set(value)
                         messagebox.showerror('SSH 연결 확인',value)
                     elif event == 'archive_ready':
+                        self.finish_progress(True)
                         self.last_archive=value
                         self.status.set('메일 바로보기 준비 완료 · 이제 프로그램을 종료해도 index.html에서 열람할 수 있습니다.')
                         webbrowser.open((value/'index.html').as_uri())
                     elif event == 'archive_error':
+                        self.finish_progress(False)
                         self.status.set(value)
                         messagebox.showerror('백업 갱신 확인',value)
                     elif event == "done":
                         self.last_archive = value
                         manifest = json.loads((value / "manifest.json").read_text(encoding="utf-8"))
+                        self.finish_progress(manifest['state']!='failed')
                         self.status.set(f"{STATES.get(manifest['state'], manifest['state'])} · {value}")
                         if manifest["state"] == "failed":
                             detail = "\n".join(manifest["warnings"][1:][-3:]) or "수집 로그를 확인하세요."
@@ -246,10 +296,12 @@ class App(tk.Tk):
                         else:
                             messagebox.showinfo("백업 완료", "백업 완료하였습니다.")
                     else:
+                        self.finish_progress(False)
                         self.status.set(value)
                         messagebox.showerror("수집 실패", value)
         except queue.Empty:
             pass
+        self.render_progress()
         self.after(100, self.poll)
 
     def stop(self):
@@ -284,7 +336,7 @@ class App(tk.Tk):
                         self.start_button.config(state='disabled')
                         self.check_button.config(state='disabled')
                         self.stop_button.config(state='normal')
-                        self.progress.start()
+                        self.begin_progress('update')
                         self.status.set('기존 백업의 메일 본문·첨부를 바로보기 파일로 변환합니다. 서버 접속 없이 진행합니다.')
                         threading.Thread(target=self.archive_worker,args=(path,),daemon=True).start()
                         return
@@ -309,7 +361,8 @@ class App(tk.Tk):
             if self.cancel_event.is_set():
                 raise Cancelled('메일 변환을 중단했습니다. 기존 백업 갱신을 다시 누르면 완료한 메일을 재사용합니다.')
         try:
-            prepare_archive(path,checkpoint,lambda message:self.events.put(('log',message)))
+            prepare_archive(path,checkpoint,lambda message:self.events.put(('log',message)),
+                progress=lambda value:self.events.put(('progress',value)))
             self.events.put(('archive_ready',path))
         except Cancelled as exc:
             self.events.put(('archive_error',str(exc)))

@@ -74,7 +74,11 @@ class PortableMailTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve()
             old=self.fixture(root)
-            prepare_archive(root)
+            progress=[]
+            prepare_archive(root,progress=progress.append)
+            self.assertEqual(list(dict.fromkeys(event['stage'] for event in progress)),['validate','mail','index'])
+            completed=[event for event in progress if event['stage']=='mail'][-1]
+            self.assertEqual((completed['completed'],completed['total']),(2,2))
             self.assertTrue(verify_archive(root)['ok'])
             for name in ('catalog.sqlite3','mail/raw/000000.mbox'):
                 self.assertEqual(digest_file(root/name),old['files'][name])

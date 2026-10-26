@@ -158,7 +158,7 @@ def safe_html(text, images):
     return str(soup)
 
 
-def render_record(root, manifest, stream, record, checkpoint):
+def render_record(root, manifest, stream, record, checkpoint, written=lambda count:None):
     directory=Path(page_path(record['id'])).parent.as_posix()
     local_path(root,directory).mkdir(parents=True,exist_ok=True)
     source_info=manifest['files'][record['source']]
@@ -188,6 +188,7 @@ def render_record(root, manifest, stream, record, checkpoint):
                     output.write(part)
                     digest.update(part)
                     size+=len(part)
+                    written(len(part))
             temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -237,19 +238,25 @@ def render_record(root, manifest, stream, record, checkpoint):
     manifest['files'].update(generated)
 
 
-def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=lambda _:None):
+def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=lambda _:None, progress=None):
+    from .progress import Reporter
+    report=Reporter(progress)
+    report('mail',detail='메일 본문·첨부 바로보기 준비',force=True)
     root=root.resolve()
     if manifest is None:
         manifest=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
     if manifest.get('viewer')!='sqlite-mail/1':
         return manifest
     if manifest.get('portable_mail',{}).get('version')==VERSION:
+        count=manifest['portable_mail']['count']
+        report('mail',count,count,'messages','이미 준비된 메일 바로보기 사용',force=True)
         return manifest
     from .db_client import safe_member
     count=0
     with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro',uri=True)) as db:
         db.row_factory=sqlite3.Row
         total=db.execute('SELECT count(*) FROM mail_records').fetchone()[0]
+        report('mail',0,total,'messages','본문·첨부 처리',force=True)
         rows=db.execute('SELECT m.*,i.title FROM mail_records m JOIN items i ON m.id=i.id ORDER BY m.source,m.begin')
         with SourceReader() as opened:
             for row in rows:
@@ -265,8 +272,15 @@ def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=l
                 if not 0<=record['begin']<=record['end']<=path.stat().st_size:
                     raise CollectionError('메일 원본의 위치 또는 크기가 일치하지 않습니다.')
                 stream=opened.open(path)
-                render_record(root,manifest,stream,record,checkpoint)
+                generated_bytes=0
+                def written(size):
+                    nonlocal generated_bytes
+                    generated_bytes+=size
+                    report('mail',count,total,'messages',f'현재 메일 {count+1:,}/{total:,} · 본문·첨부 생성 {generated_bytes/1024**2:.1f} MiB')
+                report('mail',count,total,'messages',f'현재 메일 {count+1:,}/{total:,} · 원본·완료 파일 확인 중')
+                render_record(root,manifest,stream,record,checkpoint,written)
                 count+=1
+                report('mail',count,total,'messages','본문·첨부 바로보기 생성')
                 if count%100==0 or count==total:
                     log(f'메일 바로보기 생성 {count:,} / {total:,}건')
         if count!=total:
@@ -278,6 +292,7 @@ def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=l
         if entry.get('kind')=='mail_index':
             entry['body']='static_html_and_attachments'
     atomic_write(root/'manifest.json',json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
+    report('mail',count,total,'messages','메일 바로보기 생성 완료',force=True)
     return manifest
 
 
@@ -298,20 +313,25 @@ class SourceReader:
             self.stream.close()
 
 
-def prepare_archive(root, checkpoint=lambda:None, log=lambda _:None):
+def prepare_archive(root, checkpoint=lambda:None, log=lambda _:None, progress=None):
     """One-time local conversion of an existing SSH backup, no server access."""
     root=Path(root).resolve()
+    from .progress import Reporter
+    report=Reporter(progress)
+    report('validate',detail='기존 백업 파일 확인',force=True)
     manifest=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
     if manifest.get('viewer')!='sqlite-mail/1':
         return manifest
     expected=manifest['files'].get('index.html')
-    if expected and digest_file(root/'index.html',checkpoint)!=expected:
+    if expected and digest_file(root/'index.html',checkpoint,lambda done,total:report('validate',done,total,'bytes','인덱스 무결성 확인'))!=expected:
         raise CollectionError('index.html이 변경되었습니다. 파일 무결성을 확인하세요.')
-    if digest_file(root/'catalog.sqlite3',checkpoint)!=manifest['files'].get('catalog.sqlite3'):
+    if digest_file(root/'catalog.sqlite3',checkpoint,lambda done,total:report('validate',done,total,'bytes','검색 DB 무결성 확인'))!=manifest['files'].get('catalog.sqlite3'):
         raise CollectionError('메일 검색 DB가 변경되었습니다. 파일 무결성을 확인하세요.')
     if manifest.get('portable_mail',{}).get('version')==VERSION:
+        count=manifest['portable_mail']['count']
+        report('mail',count,count,'messages','이미 준비된 메일 바로보기 사용',force=True)
         from .search_page import install_search_page
-        return install_search_page(root,checkpoint=checkpoint)
-    manifest=build_portable_mail(root,manifest,checkpoint,log)
+        return install_search_page(root,checkpoint=checkpoint,progress=progress)
+    manifest=build_portable_mail(root,manifest,checkpoint,log,progress=progress)
     from .search_page import install_search_page
-    return install_search_page(root,manifest,checkpoint)
+    return install_search_page(root,manifest,checkpoint,progress=progress)

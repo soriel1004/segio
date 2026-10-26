@@ -17,14 +17,18 @@ def script_json(value):
     return json.dumps(value, ensure_ascii=True, separators=(',', ':')).replace('<', '\\u003c')
 
 
-def install_search_page(root: Path, manifest=None, checkpoint=lambda: None):
+def install_search_page(root: Path, manifest=None, checkpoint=lambda: None, progress=None):
     """Update only presentation/search metadata; never read or rewrite raw MBOX."""
     root = root.resolve()
+    from .progress import Reporter
+    report=Reporter(progress)
+    report('index',detail='목록·분류 메타데이터 확인',force=True)
     existing = manifest is None
     if existing:
         manifest = json.loads((root/'manifest.json').read_text(encoding='utf-8'))
         if (manifest.get('browser_index') == VERSION and
                 all((root/name).is_file() for name in manifest['files'] if name.startswith('search/'))):
+            report('index',1,1,'steps','현재 인덱스 확인 완료',force=True)
             return manifest
         expected = manifest['files'].get('index.html')
         if expected and hashlib.sha256((root/'index.html').read_bytes()).hexdigest() != expected['sha256']:
@@ -48,6 +52,8 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None):
         for kind, count in db.execute('SELECT kind,count(*) FROM items GROUP BY kind'):
             if kind in counts:
                 counts[kind] = count
+        done,total=0,sum(counts.values())
+        report('index',done,total,'records','검색 자료 생성',force=True)
         cursor = db.execute('SELECT id,kind,title,folders,html,body FROM items ORDER BY rowid')
         while rows := cursor.fetchmany(CHUNK_SIZE):
             checkpoint()
@@ -65,6 +71,8 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None):
                     versions[row[8]['source']]+=1
             write(name, 'window.archiveChunk='+script_json(rows)+';')
             chunks.append(name)
+            done+=len(rows)
+            report('index',done,total,'records','검색 자료 생성')
     config = {'counts': counts, 'chunks': chunks, 'mailboxes': boxes, 'versions':versions,
               'approval_boxes':approval_boxes,
               'archive':{key:manifest.get(key) for key in
@@ -73,6 +81,7 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None):
     write('index.html', INDEX.replace('__ARCHIVE_CONFIG__', script_json(config)))
     manifest['browser_index'] = VERSION
     atomic_write(root/'manifest.json', json.dumps(manifest, ensure_ascii=False, indent=2).encode('utf-8'))
+    report('index',done,total,'records','인덱스 생성 완료',force=True)
     return manifest
 
 

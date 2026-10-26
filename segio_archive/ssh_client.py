@@ -23,6 +23,7 @@ from .archive import atomic_write
 from .compact_mail import build_compact_catalog, digest_file
 from .db_client import DBCollector, publish_local, safe_member
 from .web import Cancelled, CollectionError
+from .progress import Reporter, LABELS
 
 PROTOCOL = 'segio-ssh-archive/1'
 CHECK_PROTOCOL = 'segio-ssh-check/1'
@@ -101,10 +102,20 @@ class VerifiedHostPolicy(paramiko.MissingHostKeyPolicy):
 
 
 class SSHCollector:
-    def __init__(self, config: SSHConfig, log=lambda _:None, confirm_host=None):
+    def __init__(self, config: SSHConfig, log=lambda _:None, confirm_host=None, progress=None):
         self.config, self.log, self.confirm_host = config, log, confirm_host
         self.client = self.sftp = None
         self.phase, self.remote = 'SSH 연결', None
+        self.report=Reporter(progress)
+
+    def begin_stage(self,stage,detail=''):
+        self.phase=LABELS[stage]
+        self.report(stage,detail=detail,force=True)
+
+    def forward_progress(self,event):
+        self.phase=LABELS[event['stage']]
+        if self.report.callback:
+            self.report.callback(event)
 
     def checkpoint(self):
         if self.config.cancel.is_set():
@@ -183,6 +194,7 @@ class SSHCollector:
         self.config.validate(for_backup=False)
         try:
             self.checkpoint()
+            self.begin_stage('connect')
             self.connect(password)
             password=''
             self.checkpoint()
@@ -192,7 +204,7 @@ class SSHCollector:
                     mail=self.config.mail_template.format(initial=self.config.username[0],user=self.config.username)
                 except (ValueError,KeyError):
                     raise CollectionError('메일 경로 형식을 확인하세요.') from None
-            self.phase='SSH 서버 환경 확인'
+            self.begin_stage('environment')
             result=self.command([self.config.python,'-c',CHECK_SCRIPT,self.config.db_config,
                 self.config.cell,self.config.psql,mail,'/tmp'],protocol=CHECK_PROTOCOL,timeout=30)
             self.checkpoint()
@@ -262,6 +274,13 @@ class SSHCollector:
             if status.get('protocol') != PROTOCOL:
                 raise CollectionError('SSH 작업기 형식이 일치하지 않습니다.')
             stage = status.get('stage')
+            detail={'initializing':'서버 작업 준비 중','database':'결재 DB 읽기 전용 추출 중',
+                    'mail':'서버 메일 원본 검사 중'}.get(stage,'서버 추출 준비 확인 중')
+            if stage=='mail' and status.get('total_bytes') is not None:
+                self.report('server',status.get('completed_bytes',0),status['total_bytes'],'bytes',
+                    detail+f' · {status.get("files_done",0):,}/{status.get("files_total",0):,}개 · 시도 {status.get("attempt",1)}/3')
+            else:
+                self.report('server',detail=detail)
             if stage != previous:
                 self.log({'initializing':'SSH 서버 작업 준비 중','database':'직원의 결재 DB를 읽기 전용으로 추출하는 중',
                           'mail':'MBOX 원본 목록과 SHA-256을 확인하는 중 · 서버에 메일 복사본을 만들지 않습니다'}.get(stage,'SSH 추출 준비 확인 중'))
@@ -274,6 +293,7 @@ class SSHCollector:
             if status.get('state') == 'failed':
                 raise CollectionError(DBCollector.error_message(status.get('code')))
             if status.get('state') == 'ready':
+                self.report('server',1,1,'steps','서버 추출 준비 완료',force=True)
                 return
             self.config.cancel.wait(1)
         raise CollectionError('SSH 서버 추출 준비 대기 시간이 초과됐습니다.')
@@ -309,13 +329,17 @@ class SSHCollector:
         if total-existing+128*1024*1024 > shutil.disk_usage(folder).free:
             raise CollectionError('원본을 저장할 Windows 디스크 공간이 부족합니다.')
         done, logged = 0, 0.0
+        self.report('transfer',0,total,'bytes',force=True)
         for item,source,target in records:
             self.checkpoint()
             target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
             size = target.stat().st_size if target.exists() else 0
-            if target.is_file() and size==item['bytes'] and digest_file(target,self.checkpoint)=={'bytes':item['bytes'],'sha256':item['sha256']}:
-                done += size
-                continue
+            if target.is_file() and size==item['bytes']:
+                self.report('transfer',done,total,'bytes','이미 받은 파일 SHA-256 검사 중',force=size>=8*1024**2)
+                if digest_file(target,self.checkpoint)=={'bytes':item['bytes'],'sha256':item['sha256']}:
+                    done += size
+                    self.report('transfer',done,total,'bytes','검증된 파일 이어받기',force=done==total)
+                    continue
             if target.exists() and size>=item['bytes']:
                 target.unlink()
                 size=0
@@ -342,6 +366,8 @@ class SSHCollector:
                         if time.monotonic()-logged>2:
                             self.log(f'SFTP 전송 {done/1024**3:.2f} / {total/1024**3:.2f} GiB · {100*done/max(total,1):.1f}%')
                             logged=time.monotonic()
+                    self.report('transfer',done,total,'bytes','SFTP 전송 중')
+            self.report('transfer',done,total,'bytes','수신 파일 SHA-256 검사 중',force=item['bytes']>=8*1024**2)
             if digest_file(target,self.checkpoint) != {'bytes':item['bytes'],'sha256':item['sha256']}:
                 raise CollectionError('내려받은 파일의 SHA-256이 일치하지 않습니다. 완료로 처리하지 않았습니다. [SSH_FILE_HASH_MISMATCH]')
         manifest=json.loads((folder/'manifest.json').read_text(encoding='utf-8'))
@@ -354,11 +380,13 @@ class SSHCollector:
         for name, details in manifest['files'].items():
             if any(details[key]!=by_name[name][key] for key in ('bytes','sha256')):
                 raise CollectionError('SSH 보관 파일 검증 목록이 일치하지 않습니다.')
+        self.report('transfer',done,total,'bytes','SFTP 전송 및 파일 검증 완료',force=True)
 
     def run(self,password):
         self.config.validate()
         try:
             self.checkpoint()
+            self.begin_stage('connect')
             self.connect(password)
             password=''
             output=self.config.output.expanduser().resolve()
@@ -375,23 +403,26 @@ class SSHCollector:
             if contents.is_symlink():
                 raise CollectionError('SSH 저장 폴더에 심볼릭 링크를 사용할 수 없습니다.')
             contents.mkdir(exist_ok=True,mode=0o700)
-            self.phase='SSH 서버 추출 준비'
+            self.begin_stage('prepare')
             self.initialize(cache)
+            self.begin_stage('server')
             self.wait_ready()
-            self.phase='SFTP 원본 전송'
+            self.begin_stage('transfer','전송 목록 확인 중')
             self.transfer(contents)
-            self.phase='서버 원본 변경 검사'
+            self.begin_stage('verify')
             self.execute('verify')
             self.phase='Windows 검색 색인 생성'
             self.log('메일 검색 DB와 바로보기 HTML·첨부를 만드는 중 · 추가 저장 공간이 필요합니다')
-            build_compact_catalog(contents,self.config.username,self.checkpoint,self.log)
+            build_compact_catalog(contents,self.config.username,self.checkpoint,self.log,progress=self.forward_progress)
             archive=None
             if self.config.make_zip:
-                self.phase='Windows ZIP 생성'
+                self.begin_stage('zip')
                 archive=cache/'archive.zip'
                 size=sum(p.stat().st_size for p in contents.rglob('*') if p.is_file())
                 if size+128*1024*1024>shutil.disk_usage(cache).free:
                     raise CollectionError('추가 ZIP을 생성할 디스크 공간이 부족합니다. ZIP 선택을 해제하고 이어받으세요.')
+                zipped_bytes=0
+                self.report('zip',0,size,'bytes','원본 바이트 기준',force=True)
                 with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED,allowZip64=True) as zipped:
                     for path in contents.rglob('*'):
                         if path.is_file():
@@ -399,13 +430,19 @@ class SSHCollector:
                                 while block:=source.read(1024*1024):
                                     self.checkpoint()
                                     target.write(block)
+                                    zipped_bytes+=len(block)
+                                    self.report('zip',zipped_bytes,size,'bytes','원본 바이트 기준')
+                self.report('zip',zipped_bytes,size,'bytes','ZIP 생성 완료',force=True)
             self.checkpoint()
+            self.begin_stage('publish')
             result=publish_local(contents,archive,output,self.config.username)
+            self.begin_stage('cleanup')
             try:
                 self.execute('cleanup')
             except Exception:
                 self.log('보관은 완료됐습니다. 서버의 SSH 임시 작업 정리를 확인하지 못했습니다.')
             shutil.rmtree(cache)
+            self.report('cleanup',1,1,'steps','백업 저장 완료',force=True)
             self.log('SSH 백업과 SHA-256 검증 완료: '+str(result))
             return result
         except (CollectionError,Cancelled):

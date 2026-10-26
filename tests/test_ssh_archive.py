@@ -77,9 +77,22 @@ class SSHArchiveTests(unittest.TestCase):
             root=Path(tmp).resolve()
             server,config,original=self.fixture(root)
             fingerprints=[]
+            progress=[]
             with patch.object(helper,'run_export',side_effect=synthetic_export), \
                  patch('segio_archive.browser.launch_browser',side_effect=AssertionError('SSH must not launch a browser')):
-                result=SSHCollector(config,confirm_host=lambda *args:fingerprints.append(args) or True).run('SYNTHETIC_SSH_PASSWORD')
+                result=SSHCollector(config,confirm_host=lambda *args:fingerprints.append(args) or True,progress=progress.append).run('SYNTHETIC_SSH_PASSWORD')
+            stages=list(dict.fromkeys(event['stage'] for event in progress))
+            self.assertEqual(stages,['connect','prepare','server','transfer','verify','catalog','mail','index','publish','cleanup'])
+            transferred=[event for event in progress if event['stage']=='transfer' and event['total'] is not None]
+            self.assertEqual(transferred[0]['completed'],0)
+            self.assertEqual(transferred[-1]['completed'],transferred[-1]['total'])
+            self.assertGreater(transferred[-1]['total'],len(original))
+            mail=[event for event in progress if event['stage']=='mail']
+            self.assertEqual(mail[-1]['completed'],3)
+            self.assertEqual(mail[-1]['total'],3)
+            index=[event for event in progress if event['stage']=='index']
+            self.assertEqual(index[-1]['completed'],4)
+            self.assertEqual(index[-1]['total'],4)
             self.assertTrue(verify_archive(result)['ok'])
             self.assertEqual((result/'mail/raw/000000.mbox').read_bytes(),original)
             self.assertEqual(search(result,'회의','mail')['total'],1)
