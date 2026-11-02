@@ -10,7 +10,9 @@
 
 로컬 전체 153개 검사는 실패·오류 없이 끝났습니다. GUI 3개·관리형 Chromium file URL 정책 9개·선택 Python 2.6 런타임 부재 1개를 건너뛰었습니다. 관련 SSH 18개도 통과했고, 64KB 초과 목록 검증 및 변경 탐지·오류 상세의 비공개 값 제거·ready 상태의 도구 갱신·prepare 1회 유지·이미 받은 메일의 SFTP 읽기 0회·새 폴더명·기록된 버전·최종 해시를 검사했습니다. v0.4.15 wheel을 빌드하여 동적 패키지 버전과 오프라인 리소스 포함을 확인했고 Windows 리소스 입력과 VERSION.txt 생성도 확인했습니다. 실제 운영 5.92 GiB 캐시나 서버 원본은 이 환경에서 직접 변경하지 않았습니다. 공식 CPython 저장소의 v2.6.9 소스를 임시 폴더에서 빌드한 실제 Python 2.6.9로 120,400바이트 첨부 목록의 검증·원본 변경 탐지·서버 도구 문법을 확인했습니다. 선택 레거시 검사 5개도 실행하여 메일 재시도·ZIP64·대용량 검증 목록을 통과했습니다. 사용자 서버의 2.6.6과 패치 버전은 다릅니다.
 
-[Actions #61](https://github.com/soriel1004/segio/actions/runs/41414684535)에서 Linux는 통과했고 Windows의 합성 SSH 서버에서 상태 파일 교체 시 PermissionError가 재발했습니다. 테스트 서버의 JSON 읽기를 열린 파일의 바이트 스냅샷으로 제공하고, Windows에서만 SFTP stat/open과 시험 작업기의 JSON 교체를 같은 잠금으로 직렬화했습니다. 실제 CentOS의 열린 inode 교체를 재현하는 시험 코드 변경이며 운영 추출기의 권한 검사·오류 처리는 유지합니다. SSH 18개와 실제 Python 2.6.9 검사 5개를 다시 통과했습니다.
+[Actions #61](https://github.com/soriel1004/segio/actions/runs/41414684535)에서 Linux는 통과했고 Windows의 합성 SSH 서버에서 상태 파일 교체 시 PermissionError가 재발했습니다. 테스트 서버의 JSON 읽기를 열린 파일의 바이트 스냅샷으로 제공하고, Windows에서만 SFTP stat/open과 시험 작업기의 JSON 교체를 같은 잠금으로 직렬화했습니다. 실제 CentOS의 열린 inode 교체를 재현하는 시험 코드 변경이며 운영 추출기의 권한 검사·오류 처리는 유지합니다. SSH 18개와 실제 Python 2.6.9 검사 5개를 다시 통과했습니다. 최종 로컬 전체 재실행도 실제 Python 2.6.9를 포함하여 153개 중 실패·오류 0개, GUI·관리형 브라우저 제한 12개 건너뜀으로 종료했습니다.
+
+최종 [Actions #62](https://github.com/soriel1004/segio/actions/runs/41415770551) (`10803ee`)에서 Linux·Windows 전체 시험과 Windows 패키지 빌드가 통과했습니다. 빌드는 실제 EXE의 FileVersion/ProductVersion이 0.4.15인지 확인한 후 업로드했습니다. Windows v0.4.15 아티팩트 ID `13127414619`, 페이지 표시 372 MB, SHA-256 `fb37a7d8e194d279f6284222e6e56c5624f5ef00fd89bb3b15837114b14e8e31`입니다. 다운로드 ZIP을 한 번 풀면 실행 파일·VERSION.txt·_internal·tools가 나옵니다. 운영 서버의 전체 50GB 자료는 여기서 실제 백업하지 않았습니다.
 
 ## Windows ZIP 포장 한 번으로 변경
 
