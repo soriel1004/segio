@@ -192,6 +192,8 @@ class BrowserDeleteTests(unittest.TestCase):
                 self.assertTrue(page.evaluate("async()=>{const work=await testRoot.getDirectoryHandle('.segio-browser-edit',{create:true});await work.getFileHandle('journal.json',{create:true});return (await SegioBrowserEditor.open(testRoot,config)).recovered}"))
                 message=page.evaluate("async()=>{try{await SegioBrowserEditor.open(testRoot,{...config,archive:{...config.archive,browser_edit_id:'wrong-folder'}});return ''}catch(error){return error.message}}")
                 self.assertIn('다릅니다',message)
+                self.assertTrue(page.evaluate('async()=>Boolean(await SegioBrowserEditor.remembered(config.archive.browser_edit_id))'))
+                self.assertFalse(page.evaluate("async()=>{const old=location.href;history.replaceState(null,'','/copied/index.html');try{return Boolean(await SegioBrowserEditor.remembered(config.archive.browser_edit_id))}finally{history.replaceState(null,'',old)}}"))
                 self.assertEqual(errors,[])
 
     def test_mbox_reads_are_bounded_and_kept_large_message_bytes_are_exact(self):

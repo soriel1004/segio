@@ -70,18 +70,21 @@ async function remembered(id,value){
 }
 class BrowserEditor {
     static supported(){return isSecureContext&&typeof window.showDirectoryPicker==='function'}
-    static async remembered(id){const handle=await remembered(id);try{return handle&&await handle.queryPermission({mode:'readwrite'})==='granted'?handle:null}catch(error){return null}}
+    static folderKey(id){const url=new URL(location.href);url.hash='';url.search='';return id+'|'+url.href}
+    static async remembered(id){const handle=await remembered(this.folderKey(id));try{return handle&&await handle.queryPermission({mode:'readwrite'})==='granted'?handle:null}catch(error){return null}}
     static async open(root,config){
         const editor=new BrowserEditor(root,config);
         const recovered=await guard(root,()=>recover(root));
         if(recovered)return {recovered:true};
-        await editor.load();await remembered(config.archive.browser_edit_id,root);return editor;
+        await editor.load();await remembered(this.folderKey(config.archive.browser_edit_id),root);return editor;
     }
     constructor(root,config){this.root=root;this.config=config;this.plan=null;this.job=null;this.cancelled=false}
     checkpoint(){if(this.cancelled)fail('삭제를 중단하고 기존 자료를 복원했습니다.')}
     progress(stage,completed,total){Object.assign(this.job,{stage,completed,total})}
     async load(){
-        const root=this.root;if(await exists(root,WORK)||await exists(root,'.segio-edit'))fail('다른 삭제 작업 또는 복구가 진행 중입니다.');
+        const root=this.root;
+        if(location.protocol==='file:'){const folder=decodeURIComponent(new URL(location.href).pathname.split('/').at(-2)||'');if(root.name.toLowerCase()!==folder.toLowerCase())fail('현재 index.html이 들어 있는 백업 폴더를 선택하세요.')}
+        if(await exists(root,WORK)||await exists(root,'.segio-edit'))fail('다른 삭제 작업 또는 복구가 진행 중입니다.');
         const manifestBlob=await file(root,'manifest.json');this.revision=await digest(manifestBlob);this.manifest=JSON.parse(await manifestBlob.text());validateManifest(this.manifest);
         const index=await checked(root,'index.html',this.manifest.files);this.index=await index.text();
         if(JSON.stringify(indexConfig(this.index).value)!==JSON.stringify(this.config)||this.manifest.browser_edit_id!==this.config.archive.browser_edit_id)fail('현재 화면과 선택한 백업 폴더가 다릅니다. 해당 폴더의 index.html을 새로 열어주세요.');
