@@ -8,7 +8,7 @@ import sqlite3
 from .archive import atomic_write
 from .mail_folders import MailFolders
 
-VERSION = 'offline-search/8'
+VERSION = 'offline-search/9'
 CHUNK_SIZE = 500
 
 
@@ -27,7 +27,7 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None, prog
     if existing:
         manifest = json.loads((root/'manifest.json').read_text(encoding='utf-8'))
         if (manifest.get('browser_index') == VERSION and
-                all((root/name).is_file() for name in manifest['files'] if name.startswith('search/'))):
+                all((root/name).is_file() for name in manifest['files'] if name.startswith(('search/','viewer/')))):
             report('index',1,1,'steps','현재 인덱스 확인 완료',force=True)
             return manifest
         expected = manifest['files'].get('index.html')
@@ -76,12 +76,18 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None, prog
             chunks.append(name)
             done+=len(rows)
             report('index',done,total,'records','검색 자료 생성')
+    # Bundle the editor and its pinned dependencies for offline file:// use.
+    for asset in (Path(__file__).parent/'browser_assets').iterdir():
+        if asset.is_file():
+            write('viewer/'+asset.name,asset.read_text(encoding='utf-8'))
+    import secrets
+    manifest.setdefault('browser_edit_id',secrets.token_hex(16))
     from .pagination import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, PAGE_SIZES
     config = {'counts': counts, 'chunks': chunks, 'mailboxes': boxes, 'versions':versions,
               'pagination':{'default':DEFAULT_PAGE_SIZE,'maximum':MAX_PAGE_SIZE,'presets':PAGE_SIZES},
               'approval_boxes':approval_boxes,
               'archive':{key:manifest.get(key) for key in
-                         ('user','server','state','finished_at','coverage','warnings','snapshot_rows','local_edits')},
+                         ('user','server','state','finished_at','coverage','warnings','snapshot_rows','local_edits','browser_edit_id')},
               'reports':[name for name in ('issues.json','export-summary.txt') if presentation.path(name)]}
     write('index.html', INDEX.replace('__ARCHIVE_CONFIG__', script_json(config)))
     manifest['browser_index'] = VERSION
@@ -105,7 +111,7 @@ INDEX = r'''<!doctype html><html lang="ko"><meta charset="utf-8">
 <section id="approval-folders" class="folder-panel" hidden aria-label="결재 문서 분류"><div id="approval-boxes" class="box-list" role="group" aria-label="결재 문서함"></div><p id="approval-note">상태를 확인할 수 없는 문서는 상태 미확인에 표시합니다. 참조·수신 문서는 다른 상태 메뉴에도 함께 표시될 수 있습니다.</p></section>
 <section id="mail-folders" class="folder-panel" hidden aria-label="메일함 분류"><div id="base-mailboxes" class="box-list" role="group" aria-label="기본 메일함"></div><div id="custom-mailboxes"><h2>편지 보관함</h2><div class="box-list" role="group" aria-label="편지 보관함"></div></div></section>
 <div id="page-options"><label for="page-size-preset">페이지당 표시</label><select id="page-size-preset" aria-label="페이지당 표시 선택"></select><label for="page-size">직접 입력</label><input id="page-size" type="number" min="1" max="1000" step="1" value="100" aria-label="페이지당 표시 건수"><button id="apply-page-size" type="button">적용</button><span id="page-size-error" role="alert"></span><div id="delete-tools"><span id="selection-count" hidden>선택 0건</span><button id="delete-selected" type="button" aria-pressed="false" disabled>삭제</button><button id="cancel-selection" type="button" hidden>선택 취소</button></div></div>
-<p id="editor-hint">삭제는 Windows 프로그램의 보관함 열기로 연 화면에서 사용할 수 있습니다.</p>
+<p id="editor-hint">삭제를 누른 뒤 이 백업 폴더를 선택하고 수정을 허용하세요. Chrome·Edge에서 인덱스만 열어 삭제할 수 있습니다.</p>
 <p id="delete-message" role="status"></p><progress id="delete-progress" hidden></progress><button id="cancel-delete-job" type="button" hidden>삭제 처리 중단</button>
 <dialog id="delete-dialog" aria-labelledby="delete-heading"><h2 id="delete-heading">백업본의 선택 자료 삭제</h2><p id="delete-description"></p><ul id="delete-titles"></ul><p>선택한 자료의 본문·첨부와 백업 MBOX 안의 해당 메일을 삭제합니다. 다른 자료가 사용하는 첨부는 남깁니다. 서버 원본과 별도로 보관한 ZIP은 변경하지 않습니다. 완료 후에는 취소할 수 없습니다.</p><button id="cancel-delete" type="button">취소</button><button id="confirm-delete" type="button">백업본에서 삭제</button></dialog>
 <p id="summary" role="status"></p>
@@ -114,9 +120,11 @@ INDEX = r'''<!doctype html><html lang="ko"><meta charset="utf-8">
 <details id="record-tools"><summary>현재 목록의 원본·첨부 바로가기</summary><div id="record-links"></div></details>
 <details id="archive-info"><summary>수집 범위·검증 내역 및 추가 옵션</summary><div id="owner"></div><div id="backup-time"></div><p id="backup-status"></p><label id="version-control">결재 자료 종류 <select id="version" aria-label="결재 자료 종류"><option value="">현재·과거 전체</option><option value="active">현재 문서</option><option value="history">과거 기록</option></select></label><pre id="coverage"></pre><div id="reports" class="links"></div></details>
 <footer>첨부 원본은 해당 파일을 지원하는 Windows 프로그램으로 열립니다. 파일 무결성 검사는 수집 프로그램의 ‘파일 무결성 검증’ 기능을 이용하세요.</footer>
+<script id="archive-config" type="application/json">__ARCHIVE_CONFIG__</script>
+<script src="viewer/sql-asm.js"></script><script src="viewer/sha256.min.js"></script><script src="viewer/delete.js"></script>
 <script>
 'use strict';
-const config=__ARCHIVE_CONFIG__,offline=location.protocol==='file:',q=document.querySelector('#q'),$=selector=>document.querySelector(selector);
+const config=JSON.parse(document.getElementById('archive-config').textContent),offline=location.protocol==='file:',q=document.querySelector('#q'),$=selector=>document.querySelector(selector);
 const initial=location.hash.slice(1).split('&'),params=new URLSearchParams(initial.slice(1).join('&'));
 function validPageSize(value){return /^[0-9]+$/.test(String(value))&&Number.isSafeInteger(Number(value))&&Number(value)>=1&&Number(value)<=config.pagination.maximum?Number(value):null}
 let pageSize=validPageSize(params.get('size'))||config.pagination.default;
@@ -128,7 +136,7 @@ for(const size of config.pagination.presets){const option=document.createElement
 const custom=document.createElement('option');custom.value='custom';custom.textContent='직접 입력';$('#page-size-preset').append(custom);
 function syncPageSize(){$('#page-size').value=String(pageSize);$('#page-size-preset').value=config.pagination.presets.includes(pageSize)?String(pageSize):'custom'}
 syncPageSize();
-let editorInfo=null,deletePlan=null,editingBusy=false,deleteMode=false,savedDisabled=[],selectedIds=new Set(),activeDeleteJob=null;
+let editorInfo=null,deletePlan=null,editingBusy=false,deleteMode=false,savedDisabled=[],selectedIds=new Set(),activeDeleteJob=null,browserEditor=null,rememberedFolder=null;
 const labels={all:'전체',approval:'결재',mail:'메일'},allCount=config.counts.approval+config.counts.mail;
 function time(value){const date=new Date(value);return value&&!Number.isNaN(date.getTime())?date.toLocaleString('ko-KR',{timeZone:'Asia/Seoul'})+' KST':String(value||'')}
 function action(label,path){const link=document.createElement('a');link.textContent=label;link.href=String(path).split('/').map(encodeURIComponent).join('/');link.target='_blank';link.rel='noopener noreferrer';return link}
@@ -186,15 +194,16 @@ function updateSelection(){const selecting=Boolean(editorInfo)&&deleteMode;docum
 $('#cancel-selection').onclick=()=>{deleteMode=false;selectedIds.clear();for(const input of document.querySelectorAll('.item-select'))input.checked=false;updateSelection();$('#delete-selected').focus()};
 $('#select-page').onchange=()=>{for(const input of document.querySelectorAll('.item-select')){input.checked=$('#select-page').checked;if(input.checked)selectedIds.add(input.dataset.id);else selectedIds.delete(input.dataset.id)}updateSelection()};
 function editingState(busy){editingBusy=busy;if(busy){savedDisabled=[...document.querySelectorAll('button,input,select')].filter(element=>!element.closest('dialog')&&element.id!=='cancel-delete-job').map(element=>[element,element.disabled]);for(const [element] of savedDisabled)element.disabled=true}else{for(const [element,value] of savedDisabled)element.disabled=value;savedDisabled=[];updateSelection()}}
-async function postEdit(action,data){const response=await fetch('api/delete/'+action,{method:'POST',headers:{'Content-Type':'application/json','X-Archive-CSRF':editorInfo.csrf},body:JSON.stringify(data)});const value=await response.json();if(!response.ok)throw Error(value.error||'삭제 요청을 처리하지 못했습니다.');return value}
-$('#delete-selected').onclick=async()=>{if(!editorInfo||editingBusy)return;if(!deleteMode){deleteMode=true;updateSelection();const first=document.querySelector('.item-select');if(first)first.focus();return}if(!selectedIds.size)return;editingState(true);$('#delete-message').textContent='삭제할 자료와 필요한 임시 공간을 확인합니다.';try{deletePlan=await postEdit('preview',{ids:[...selectedIds]});$('#delete-description').textContent='결재 '+deletePlan.approval+'건 · 메일 '+deletePlan.mail+'건을 삭제합니다. 최대 임시 공간: '+(deletePlan.temporary_bytes/1024**3).toFixed(2)+' GiB'+(deletePlan.raw_files?' · 공유 메일 원본 '+deletePlan.raw_files+'개를 검사·정리합니다.':'');$('#delete-titles').replaceChildren();for(const title of deletePlan.titles){const li=document.createElement('li');li.textContent=title;$('#delete-titles').append(li)}$('#delete-dialog').showModal()}catch(error){$('#delete-message').textContent=error.message;editingState(false)}};
+async function postEdit(action,data){if(editorInfo.browser)return browserEditor.request(action,data);const response=await fetch('api/delete/'+action,{method:'POST',headers:{'Content-Type':'application/json','X-Archive-CSRF':editorInfo.csrf},body:JSON.stringify(data)});const value=await response.json();if(!response.ok)throw Error(value.error||'삭제 요청을 처리하지 못했습니다.');return value}
+$('#delete-selected').onclick=async()=>{if(!editorInfo||editingBusy)return;if(!deleteMode){if(editorInfo.browser&&!browserEditor){try{const handle=rememberedFolder||await window.showDirectoryPicker({mode:'readwrite',id:'segio-archive'});if(await handle.requestPermission({mode:'readwrite'})!=='granted')throw Error('백업 폴더 수정 권한을 허용해야 삭제할 수 있습니다.');editingState(true);$('#delete-message').textContent='백업 폴더와 삭제 기능을 준비합니다.';browserEditor=await window.SegioBrowserEditor.open(handle,config);if(browserEditor.recovered){editingState(false);location.reload();return}editingState(false);$('#delete-message').textContent=''}catch(error){editingState(false);$('#delete-message').textContent=error.name==='AbortError'?'폴더 선택을 취소했습니다.':error.message;browserEditor=null;return}}deleteMode=true;updateSelection();const first=document.querySelector('.item-select');if(first)first.focus();return}if(!selectedIds.size)return;editingState(true);$('#delete-message').textContent='삭제할 자료와 필요한 임시 공간을 확인합니다.';try{deletePlan=await postEdit('preview',{ids:[...selectedIds]});$('#delete-description').textContent='결재 '+deletePlan.approval+'건 · 메일 '+deletePlan.mail+'건을 삭제합니다. 최대 임시 공간: '+(deletePlan.temporary_bytes/1024**3).toFixed(2)+' GiB'+(deletePlan.raw_files?' · 공유 메일 원본 '+deletePlan.raw_files+'개를 검사·정리합니다.':'');$('#delete-titles').replaceChildren();for(const title of deletePlan.titles){const li=document.createElement('li');li.textContent=title;$('#delete-titles').append(li)}$('#delete-dialog').showModal()}catch(error){$('#delete-message').textContent=error.message;editingState(false)}};
 $('#cancel-delete').onclick=()=>{$('#delete-dialog').close();deletePlan=null;$('#delete-message').textContent='삭제하지 않았습니다.';editingState(false)};
 $('#delete-dialog').oncancel=event=>{event.preventDefault();$('#cancel-delete').click()};
 function editDuration(seconds){return [Math.floor(seconds/3600),Math.floor(seconds/60)%60,seconds%60].map(value=>String(value).padStart(2,'0')).join(':')}
-function watchDelete(identity){activeDeleteJob=identity;$('#delete-progress').hidden=false;$('#cancel-delete-job').hidden=false;async function poll(){try{const response=await fetch('api/delete/status?'+new URLSearchParams({job:identity}));if(!response.ok)throw Error('삭제 작업 상태를 확인하지 못했습니다. 프로그램의 보관함 열기로 다시 확인하세요.');const value=await response.json();const names={prepare:'삭제 준비',files:'본문·첨부 확인',mail:'메일 원본 재구성',index:'목록·검색 갱신',commit:'삭제 적용'};if(value.total>0){$('#delete-progress').max=value.total;$('#delete-progress').value=value.completed}else $('#delete-progress').removeAttribute('value');const count=value.stage==='mail'&&value.total?' · '+(value.completed/1024**3).toFixed(2)+' / '+(value.total/1024**3).toFixed(2)+' GiB':'';$('#delete-message').textContent=(value.state==='running'?names[value.stage]||'삭제 처리':value.message)+count+' · 경과 '+editDuration(value.elapsed);$('#cancel-delete-job').disabled=!value.can_cancel;if(value.state==='running'){setTimeout(poll,500)}else{activeDeleteJob=null;$('#cancel-delete-job').hidden=true;$('#delete-progress').hidden=true;if(value.state==='done'){if(value.result&&value.result.cleanup_pending)window.alert(value.message);location.reload()}else{editingState(false);if(!value.recovery_required)load()}}}catch(error){$('#delete-message').textContent=error.message;$('#cancel-delete-job').hidden=true;$('#delete-progress').hidden=true;editingState(false)}}poll()}
+function watchDelete(identity){activeDeleteJob=identity;$('#delete-progress').hidden=false;$('#cancel-delete-job').hidden=false;async function poll(){try{let value;if(editorInfo.browser){value=browserEditor.status(identity)}else{const response=await fetch('api/delete/status?'+new URLSearchParams({job:identity}));if(!response.ok)throw Error('삭제 작업 상태를 확인하지 못했습니다. 프로그램의 보관함 열기로 다시 확인하세요.');value=await response.json()}const names={prepare:'삭제 준비',files:'본문·첨부 확인',mail:'메일 원본 재구성',index:'목록·검색 갱신',commit:'삭제 적용'};if(value.total>0){$('#delete-progress').max=value.total;$('#delete-progress').value=value.completed}else $('#delete-progress').removeAttribute('value');const count=value.stage==='mail'&&value.total?' · '+(value.completed/1024**3).toFixed(2)+' / '+(value.total/1024**3).toFixed(2)+' GiB':'';$('#delete-message').textContent=(value.state==='running'?names[value.stage]||'삭제 처리':value.message)+count+' · 경과 '+editDuration(value.elapsed);$('#cancel-delete-job').disabled=!value.can_cancel;if(value.state==='running'){setTimeout(poll,500)}else{activeDeleteJob=null;$('#cancel-delete-job').hidden=true;$('#delete-progress').hidden=true;if(value.state==='done'){if(value.result&&value.result.cleanup_pending)window.alert(value.message);editingState(false);location.reload()}else{if(editorInfo.browser){browserEditor=null;deleteMode=false}editingState(false);if(!value.recovery_required)load()}}}catch(error){$('#delete-message').textContent=error.message;$('#cancel-delete-job').hidden=true;$('#delete-progress').hidden=true;editingState(false)}}poll()}
+window.addEventListener('beforeunload',event=>{if(editorInfo?.browser&&editingBusy){event.preventDefault();event.returnValue=''}});
 $('#confirm-delete').onclick=async()=>{const plan=deletePlan;$('#delete-dialog').close();deletePlan=null;try{const value=await postEdit('start',{plan:plan.plan,confirmation:'delete-selected'});watchDelete(value.job)}catch(error){$('#delete-message').textContent=error.message;editingState(false)}};
 $('#cancel-delete-job').onclick=async()=>{try{await postEdit('cancel',{job:activeDeleteJob});$('#delete-message').textContent='중단 요청을 보냈습니다. 기존 자료 복구가 끝날 때까지 기다려주세요.';$('#cancel-delete-job').disabled=true}catch(error){$('#delete-message').textContent=error.message}};
-async function initialiseEditor(){if(offline)return;try{const response=await fetch('api/editor');if(!response.ok)return;const value=await response.json();if(!value.enabled)return;editorInfo=value;document.body.classList.add('editable');$('#editor-hint').textContent='삭제 버튼을 누르면 목록 앞에 선택 상자가 나타납니다. 자료를 선택한 뒤 선택한 자료 삭제를 누르세요. 이 프로그램을 계속 실행해 두세요.';updateSelection();if(value.active_job){sequence++;editingState(true);watchDelete(value.active_job.id)}}catch(error){/* Viewing is available even if management is unavailable. */}}
+async function initialiseEditor(){if(offline){if(window.SegioBrowserEditor?.supported()){editorInfo={browser:true};updateSelection();rememberedFolder=await window.SegioBrowserEditor.remembered(config.archive.browser_edit_id)}else $('#editor-hint').textContent='직접 삭제하려면 최신 Chrome 또는 Edge로 index.html을 열어주세요. 삭제 시 백업 폴더 수정 권한이 필요합니다.';return}try{const response=await fetch('api/editor');if(!response.ok)return;const value=await response.json();if(!value.enabled)return;editorInfo=value;document.body.classList.add('editable');$('#editor-hint').textContent='삭제 버튼을 누르면 목록 앞에 선택 상자가 나타납니다. 자료를 선택한 뒤 선택한 자료 삭제를 누르세요. 이 프로그램을 계속 실행해 두세요.';updateSelection();if(value.active_job){sequence++;editingState(true);watchDelete(value.active_job.id)}}catch(error){/* Viewing is available even if management is unavailable. */}}
 const edits=config.archive.local_edits;if(edits)$('#delete-message').textContent='이 백업본에서 삭제된 자료: 결재 '+edits.deleted_approval+'건 · 메일 '+edits.deleted_mail+'건';
 load();initialiseEditor();
 </script></html>'''

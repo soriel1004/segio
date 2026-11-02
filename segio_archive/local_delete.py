@@ -87,6 +87,8 @@ def selected(db, ids):
 
 def preview(root, ids):
     root=Path(root).resolve()
+    if (root/'.segio-browser-edit').exists():
+        raise CollectionError('인덱스에서 브라우저 삭제 또는 복구를 완료한 뒤 다시 시도하세요.')
     if (root/WORK).exists():
         raise CollectionError('삭제 처리 또는 복구가 진행 중입니다.')
     manifest=json.loads(local(root,'manifest.json').read_text(encoding='utf-8'))
@@ -128,6 +130,8 @@ def recover(root):
     """Rollback an interrupted install; a committed operation only needs cleanup."""
     root=Path(root).resolve()
     work=root/WORK
+    if (root/'.segio-browser-edit').exists():
+        raise CollectionError('index.html에서 삭제 버튼을 눌러 백업 폴더를 선택하고 브라우저 삭제 복구를 완료하세요.')
     if not work.exists():
         return
     with edit_lock(root):
@@ -144,7 +148,7 @@ def _recover(root):
     if data['phase']=='installing':
         for record in reversed(data['paths']):
             name=record['name']
-            if name not in ('manifest.json','catalog.json','catalog.sqlite3','index.html') and not name.startswith(('documents/','mail/','search/')):
+            if name not in ('manifest.json','catalog.json','catalog.sqlite3','index.html') and not name.startswith(('documents/','mail/','search/','viewer/')):
                 raise CollectionError('삭제 복구 경로가 올바르지 않습니다.')
             target=local(root,name)
             backup=local(work/'backup',name)
@@ -237,6 +241,8 @@ def _delete_items(root, ids, revision, checkpoint, report, fault):
     committed=False
     try:
         checkpoint()
+        if (root/'.segio-browser-edit').exists():
+            raise CollectionError('인덱스에서 브라우저 삭제 처리가 진행 중입니다.')
         for name in ('catalog.json','mail/sources.json'):
             if name in files:
                 source=checked(root,name,files)
