@@ -81,6 +81,31 @@ class BrowserTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "Windows desktop test; Linux has no display")
 class WindowsStartupTests(unittest.TestCase):
+    def test_open_archive_starts_local_editor_without_ssh_credentials(self):
+        import time
+        import test_local_delete as fixture
+        from segio_archive.gui import App
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()
+            fixture.LocalDeleteTests().fixture(root)
+            app=App()
+            try:
+                with patch('segio_archive.gui.filedialog.askdirectory',return_value=str(root)), \
+                     patch('segio_archive.gui.webbrowser.open') as opened:
+                    app.open_archive()
+                    deadline=time.monotonic()+10
+                    while app.running and time.monotonic()<deadline:
+                        app.update()
+                        time.sleep(.01)
+                    self.assertFalse(app.running)
+                    self.assertIsNotNone(app.viewer)
+                    self.assertIsNotNone(app.viewer.editor)
+                    opened.assert_called_with(app.viewer.url)
+                    self.assertEqual(app.ssh_password.get(),'')
+            finally:
+                app.running=False
+                app.close()
+
     def test_login_window_opens_without_browser_download_or_launch(self):
         from segio_archive.gui import App, APP_TITLE
         with patch("segio_archive.browser.launch_browser") as launch:

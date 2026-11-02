@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import mimetypes
+import hmac
 import json
 import re
 import secrets
@@ -13,8 +14,10 @@ from urllib.parse import unquote, urlsplit, parse_qs, quote
 
 
 class Viewer:
-    def __init__(self, folder: Path):
+    def __init__(self, folder: Path, editable=False):
         self.folder = folder.resolve()
+        from .local_delete import recover
+        recover(self.folder)
         if not (self.folder / "index.html").is_file():
             raise ValueError("보관함 index.html이 없습니다.")
         try:
@@ -25,6 +28,9 @@ class Viewer:
             from .search_page import install_search_page
             install_search_page(self.folder)
         self.token = secrets.token_urlsafe(24)
+        self.lock=threading.RLock()
+        from .editor import Editor
+        self.editor=Editor(self.folder,self.lock) if editable and self.compact else None
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -37,7 +43,83 @@ class Viewer:
             def do_HEAD(self):
                 self.serve(True)
 
+            def do_POST(self):
+                origin=f'http://127.0.0.1:{owner.server.server_port}'
+                prefix='/'+owner.token+'/'
+                path=urlsplit(self.path).path
+                csrf=self.headers.get('X-Archive-CSRF','')
+                if (owner.editor is None or self.headers.get('Host')!=f'127.0.0.1:{owner.server.server_port}' or
+                    self.headers.get('Origin')!=origin or not path.startswith(prefix) or not csrf.isascii() or
+                    not hmac.compare_digest(csrf,owner.editor.csrf)):
+                    return self.send_error(403)
+                if self.headers.get('Content-Type','').split(';',1)[0]!='application/json' or self.headers.get('Transfer-Encoding'):
+                    return self.send_error(415)
+                try:
+                    self.connection.settimeout(15)
+                    length=int(self.headers.get('Content-Length','0'))
+                    if not 0<length<=65536:
+                        return self.send_error(413)
+                    data=json.loads(self.rfile.read(length))
+                    if not isinstance(data,dict):
+                        raise ValueError()
+                    action=path[len(prefix):]
+                    if action=='api/delete/preview':
+                        result=owner.editor.preview(data.get('ids'))
+                    elif action=='api/delete/start' and data.get('confirmation')=='delete-selected':
+                        result={'job':owner.editor.start(data.get('plan'))}
+                    elif action=='api/delete/cancel':
+                        owner.editor.cancel(data.get('job'))
+                        result={'ok':True}
+                    else:
+                        return self.send_error(404)
+                    return self.payload(json.dumps(result,ensure_ascii=False).encode('utf-8'),'application/json',False)
+                except Exception as exc:
+                    from .web import CollectionError
+                    message=str(exc) if isinstance(exc,CollectionError) else '삭제 요청 형식을 확인하세요.'
+                    return self.payload(json.dumps({'error':message},ensure_ascii=False).encode('utf-8'),'application/json',False,status=400)
+
             def serve(self, head):
+                if self.headers.get('Host')!=f'127.0.0.1:{owner.server.server_port}':
+                    return self.send_error(403)
+                prefix='/'+owner.token+'/'
+                path=unquote(urlsplit(self.path).path)
+                if not path.startswith(prefix):
+                    return self.send_error(404)
+                relative=path[len(prefix):]
+                if relative=='api/editor':
+                    result={'enabled':owner.editor is not None}
+                    if owner.editor:
+                        result['csrf']=owner.editor.csrf
+                        if owner.editor.busy:
+                            result['active_job']=owner.editor.status(owner.editor.job['id'])
+                    return self.payload(json.dumps(result).encode('utf-8'),'application/json',head)
+                if relative=='api/delete/status' and owner.editor:
+                    try:
+                        identity=parse_qs(urlsplit(self.path).query).get('job',[''])[0]
+                        return self.payload(json.dumps(owner.editor.status(identity),ensure_ascii=False).encode('utf-8'),'application/json',head)
+                    except Exception:
+                        return self.send_error(404)
+                if relative.split('/')[0].startswith('.segio-'):
+                    return self.send_error(404)
+                if relative=='index.html' and owner.editor and owner.editor.busy and owner.editor.index_bytes is not None:
+                    return self.payload(owner.editor.index_bytes,'text/html; charset=utf-8',head,index=True)
+                # The index remains available so a closed tab can reopen the
+                # active job and cancel it; mixed metadata reads are blocked.
+                if owner.editor and relative!='index.html':
+                    while True:
+                        if owner.editor.busy or owner.editor.recovery_required:
+                            return self.payload(b'{"error":"archive_edit_in_progress"}','application/json',head,status=423)
+                        if owner.lock.acquire(timeout=.1):
+                            break
+                    try:
+                        if owner.editor.busy or owner.editor.recovery_required:
+                            return self.payload(b'{"error":"archive_edit_in_progress"}','application/json',head,status=423)
+                        return self.serve_content(head)
+                    finally:
+                        owner.lock.release()
+                return self.serve_content(head)
+
+            def serve_content(self, head):
                 if self.headers.get("Host") != f"127.0.0.1:{owner.server.server_port}":
                     return self.send_error(403)
                 prefix = "/" + owner.token + "/"
@@ -93,6 +175,8 @@ class Viewer:
                 target = (owner.folder / name[len(prefix):]).resolve()
                 if not target.is_relative_to(owner.folder) or not target.is_file():
                     return self.send_error(404)
+                if any(part.startswith('.segio-') for part in target.relative_to(owner.folder).parts):
+                    return self.send_error(404)
                 mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
                 self.send_response(200)
                 self.send_header("Content-Type", mime + ("; charset=utf-8" if mime == "text/html" else ""))
@@ -117,20 +201,21 @@ class Viewer:
                     except (BrokenPipeError, ConnectionResetError):
                         pass
 
-            def headers_for(self, mime, length, filename=None):
-                self.send_response(200)
+            def headers_for(self, mime, length, filename=None, status=200, index=False):
+                self.send_response(status)
                 self.send_header('Content-Type',mime)
                 self.send_header('Content-Length',str(length))
                 self.send_header('Cache-Control','no-store')
                 self.send_header('Referrer-Policy','no-referrer')
                 self.send_header('X-Content-Type-Options','nosniff')
-                self.send_header('Content-Security-Policy',"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'")
+                self.send_header('Content-Security-Policy',"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"+
+                                 ("; script-src 'self' 'unsafe-inline'; connect-src 'self'" if index else ''))
                 if filename:
                     self.send_header('Content-Disposition',"attachment; filename*=UTF-8''"+quote(filename))
                 self.end_headers()
 
-            def payload(self, data, mime, head, filename=None):
-                self.headers_for(mime,len(data),filename)
+            def payload(self, data, mime, head, filename=None, status=200, index=False):
+                self.headers_for(mime,len(data),filename,status,index)
                 if not head:
                     try:
                         self.wfile.write(data)
@@ -147,6 +232,12 @@ class Viewer:
         return f"http://127.0.0.1:{self.server.server_port}/{self.token}/index.html"
 
     def close(self):
+        if self.editor:
+            self.editor.close()
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+
+    @property
+    def is_busy(self):
+        return self.editor is not None and self.editor.busy

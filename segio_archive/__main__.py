@@ -49,6 +49,7 @@ def main():
     verify.add_argument("folder", type=Path)
     view = sub.add_parser("view", help="서버 연결 없이 로컬 보관함 열기")
     view.add_argument("folder", type=Path)
+    view.add_argument('--edit',action='store_true',help='로컬 백업본의 선택 삭제 허용')
     prepare=sub.add_parser('prepare-offline',help='기존 SSH 백업의 메일 본문·첨부를 index.html 바로보기로 변환')
     prepare.add_argument('folder',type=Path)
     args = parser.parse_args()
@@ -84,7 +85,7 @@ def main():
         import webbrowser
         import threading
         from .viewer import Viewer
-        viewer = Viewer(args.folder)
+        viewer = Viewer(args.folder,editable=args.edit)
         webbrowser.open(viewer.url)
         print("보관함을 열었습니다. 종료하려면 Ctrl+C를 누르세요.")
         try:

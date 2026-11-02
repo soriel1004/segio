@@ -316,6 +316,8 @@ class SourceReader:
 def prepare_archive(root, checkpoint=lambda:None, log=lambda _:None, progress=None):
     """One-time local conversion of an existing SSH backup, no server access."""
     root=Path(root).resolve()
+    from .local_delete import recover
+    recover(root)
     from .progress import Reporter
     report=Reporter(progress)
     report('validate',detail='기존 백업 파일 확인',force=True)

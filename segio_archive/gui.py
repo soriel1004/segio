@@ -279,8 +279,21 @@ class App(tk.Tk):
                     elif event == 'archive_ready':
                         self.finish_progress(True)
                         self.last_archive=value
-                        self.status.set('메일 바로보기 준비 완료 · 이제 프로그램을 종료해도 index.html에서 열람할 수 있습니다.')
-                        webbrowser.open((value/'index.html').as_uri())
+                        try:
+                            from .viewer import Viewer
+                            if self.viewer and self.viewer.is_busy:
+                                webbrowser.open(self.viewer.url)
+                                self.status.set('삭제 처리가 진행 중입니다. 완료 후 보관함을 다시 열어주세요.')
+                            else:
+                                viewer=Viewer(value,editable=True)
+                                if self.viewer:
+                                    self.viewer.close()
+                                self.viewer=viewer
+                                self.status.set('보관함을 열었습니다. 이 창을 유지하면 인덱스에서 백업본 자료를 삭제할 수 있습니다.')
+                                webbrowser.open(self.viewer.url)
+                        except Exception as exc:
+                            self.status.set('보관함 관리 화면을 열지 못했습니다.')
+                            messagebox.showerror('보관함 확인','관리 화면을 열지 못했습니다. 다시 열어주세요. ['+type(exc).__name__+']')
                     elif event == 'archive_error':
                         self.finish_progress(False)
                         self.status.set(value)
@@ -320,6 +333,9 @@ class App(tk.Tk):
         return Path(value) if value else None
 
     def open_archive(self):
+        if self.viewer and self.viewer.is_busy:
+            webbrowser.open(self.viewer.url)
+            return
         if self.running:
             return
         path = self.select_archive()
@@ -384,6 +400,9 @@ class App(tk.Tk):
     def close(self):
         if self.running:
             messagebox.showinfo("수집 중", "‘중단’을 누르고 현재 요청이 끝난 뒤 창을 닫아주세요.")
+            return
+        if self.viewer and self.viewer.is_busy:
+            messagebox.showinfo('삭제 처리 중','브라우저의 삭제 처리가 끝나거나 중단된 뒤 종료하세요. 보관함 열기로 진행 창을 다시 열 수 있습니다.')
             return
         if self.viewer:
             self.viewer.close()
