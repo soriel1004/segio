@@ -18,6 +18,7 @@ class Editor:
         self.cancel_event=threading.Event()
         self.recovery_required=False
         self.index_bytes=None
+        self.closed=False
 
     @property
     def busy(self):
@@ -25,7 +26,7 @@ class Editor:
             return self.job is not None and self.job['state']=='running'
 
     def preview(self,ids):
-        if self.busy or self.recovery_required or not self.archive_lock.acquire(blocking=False):
+        if self.closed or self.busy or self.recovery_required or not self.archive_lock.acquire(blocking=False):
             raise CollectionError('백업본 정리 또는 복구 중입니다.')
         try:
             value=local_delete.preview(self.root,ids)
@@ -39,6 +40,8 @@ class Editor:
 
     def start(self,token):
         with self.mutex:
+            if self.closed:
+                raise CollectionError('관리 화면이 종료되었습니다. 보관함을 다시 열어주세요.')
             if self.job is not None and self.job['state']=='running':
                 raise CollectionError('삭제 처리가 진행 중입니다.')
             plan=self.plans.pop(token,None) if isinstance(token,str) else None
@@ -105,6 +108,9 @@ class Editor:
             self.cancel_event.set()
 
     def close(self):
-        self.cancel_event.set()
-        if self.thread:
-            self.thread.join()
+        with self.mutex:
+            self.closed=True
+            self.cancel_event.set()
+            thread=self.thread
+        if thread:
+            thread.join()

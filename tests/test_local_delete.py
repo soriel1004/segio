@@ -346,6 +346,11 @@ class LocalDeleteTests(unittest.TestCase):
                 self.assertEqual(self.request(viewer,'start',{'plan':plan['plan'],'confirmation':'delete-selected'})[0],400)
                 self.assertEqual(search(root)['total'],2)
                 self.assertTrue(verify_archive(root)['ok'])
+                pending=viewer.editor.preview(['approval-old'])
+                viewer.editor.close()
+                with self.assertRaisesRegex(CollectionError,'종료'):
+                    viewer.editor.start(pending['plan'])
+                self.assertEqual(search(root)['total'],2)
             finally:viewer.close()
 
     @unittest.skipUnless(fixtures.BROWSER,'Real Chromium required')
