@@ -2,6 +2,7 @@ from contextlib import closing
 from email.message import EmailMessage
 import base64
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -14,9 +15,9 @@ from unittest.mock import patch
 from bs4 import BeautifulSoup
 from segio_archive.archive import verify_archive
 from segio_archive.compact_mail import digest_file
-from segio_archive.portable_mail import prepare_archive,page_path,BLOCK
+from segio_archive.portable_mail import prepare_archive,page_path,BLOCK,decoded,MailFormatError
 from segio_archive.viewer import Viewer
-from segio_archive.web import Cancelled
+from segio_archive.web import Cancelled,CollectionError
 from test_search_page import navigate
 
 BROWSER=os.environ.get('SEGIO_TEST_BROWSER') or shutil.which('chromium')
@@ -24,6 +25,28 @@ PNG=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42m
 
 
 class PortableMailTests(unittest.TestCase):
+    def test_base64_truncation_is_reported_without_silently_discarding_trailing_data(self):
+        for payload in (b'a',b'YQ==YWJj',b'YQ==\nYQ==',b'YWJj!'):
+            with self.subTest(payload=payload),self.assertRaises(MailFormatError):
+                b''.join(decoded(io.BytesIO(payload),0,len(payload),'base64',lambda:None))
+        for payload in (b'aGVsbG8=',b'aGVsbG8',b'aGVs\r\nbG8=\r\n'):
+            self.assertEqual(b''.join(decoded(io.BytesIO(payload),0,len(payload),'base64',lambda:None)),b'hello')
+
+    def append_messages(self,root,payloads):
+        raw=root/'mail/raw/000000.mbox'
+        with closing(sqlite3.connect(root/'catalog.sqlite3')) as db,raw.open('ab') as stream:
+            for number,payload in enumerate(payloads,2):
+                stream.write(b'\nFrom synthetic@example.test Tue Oct 20 10:00:00 2026\n')
+                start=stream.tell();stream.write(payload);end=stream.tell()
+                identity=f'mail-{number:09d}'
+                db.execute('INSERT INTO items VALUES (?,?,?,?,?,?)',(identity,'mail','Synthetic added mail','받은 편지함','','mail/'+identity))
+                db.execute('INSERT INTO mail_records VALUES (?,?,?,?,?,?,?)',(identity,'mail/raw/000000.mbox',start,end,'synthetic@example.test','',''))
+            db.commit()
+        manifest=json.loads((root/'manifest.json').read_text())
+        for name in ('catalog.sqlite3','mail/raw/000000.mbox'):manifest['files'][name]=digest_file(root/name)
+        manifest['counts']['mail']=2+len(payloads)
+        (root/'manifest.json').write_text(json.dumps(manifest),encoding='utf-8')
+
     def fixture(self,root,large=False):
         raw=root/'mail/raw/000000.mbox'
         raw.parent.mkdir(parents=True)
@@ -152,10 +175,69 @@ class PortableMailTests(unittest.TestCase):
                 if path.suffix=='.partial':raise OSError(28,'No space left on device')
                 return original_open(path,*args,**kwargs)
             with patch.object(Path,'open',full_disk):
-                with self.assertRaises(OSError):prepare_archive(root)
+                with self.assertRaisesRegex(CollectionError,'LOCAL_DISK_FULL'):prepare_archive(root)
             self.assertEqual(digest_file(root/'index.html'),old['files']['index.html'])
             self.assertNotIn('portable_mail',json.loads((root/'manifest.json').read_text(encoding='utf-8')))
             self.assertTrue(verify_archive(root)['ok'])
+
+    def test_damaged_attachment_and_mime_are_reported_and_later_mail_still_renders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();self.fixture(root)
+            self.append_messages(root,[
+                b'Subject: Broken attachment\nContent-Type: multipart/mixed; boundary=bad\n\n'
+                b'--bad\nContent-Type: text/plain\n\nReadable body\n'
+                b'--bad\nContent-Type: application/octet-stream\nContent-Disposition: attachment; filename=broken.bin\nContent-Transfer-Encoding: base64\n\na\n--bad--\n',
+                b'Subject: Broken MIME\nContent-Type: multipart/mixed; boundary=missing\n\nno delimiter',
+                b'Subject: Following mail\nContent-Type: text/plain\n\nFOLLOWING_BODY'])
+            raw=digest_file(root/'mail/raw/000000.mbox')
+            manifest=prepare_archive(root)
+            issues=json.loads((root/'mail/render-issues.json').read_text())['issues']
+            self.assertEqual([entry['code'] for entry in issues],['damaged_part','damaged_mime'])
+            self.assertEqual(manifest['portable_mail']['excluded_parts'],2)
+            page=root/page_path('mail-000000002')
+            self.assertIn('Readable body',page.read_text())
+            self.assertIn('손상',page.read_text())
+            self.assertEqual(list((page.parent/'attachments').iterdir()),[])
+            self.assertIn('손상',(root/page_path('mail-000000003')).read_text())
+            self.assertIn('FOLLOWING_BODY',(root/page_path('mail-000000004')).read_text())
+            self.assertEqual(digest_file(root/'mail/raw/000000.mbox'),raw)
+            self.assertTrue(verify_archive(root)['ok'])
+            self.assertEqual(prepare_archive(root)['portable_mail']['excluded_parts'],2)
+
+    def test_windows_security_blocks_exclude_attachment_and_preserve_other_parts(self):
+        for winerror in (225,226):
+            with self.subTest(winerror=winerror),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp).resolve();old=self.fixture(root);original=Path.open
+                def blocked(path,*args,**kwargs):
+                    if path.name.endswith('CON.txt.partial'):
+                        exc=OSError(13,'PRIVATE_ANTIVIRUS_TEXT');exc.winerror=winerror;raise exc
+                    return original(path,*args,**kwargs)
+                with patch.object(Path,'open',blocked):manifest=prepare_archive(root)
+                issues=json.loads((root/'mail/render-issues.json').read_text())['issues']
+                self.assertEqual([issue['code'] for issue in issues],['security_blocked'])
+                page=(root/page_path('mail-000000000')).read_text()
+                self.assertIn('한글 표 내용',page)
+                self.assertIn('보안 프로그램',page)
+                self.assertNotIn('PRIVATE_ANTIVIRUS_TEXT',page+json.dumps(issues))
+                self.assertIn('두 번째 본문',(root/page_path('mail-000000001')).read_text())
+                self.assertEqual(manifest['portable_mail']['excluded_parts'],1)
+                self.assertEqual(digest_file(root/'mail/raw/000000.mbox'),old['files']['mail/raw/000000.mbox'])
+                self.assertTrue(verify_archive(root)['ok'])
+
+    def test_ordinary_permission_and_unknown_errors_stop_with_safe_mail_diagnostic(self):
+        for error in (PermissionError(13,'PRIVATE_PATH_AND_MESSAGE'),RuntimeError('PRIVATE_PATH_AND_MESSAGE')):
+            with self.subTest(kind=type(error).__name__),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp).resolve();old=self.fixture(root)
+                with patch('segio_archive.portable_mail.safe_html',side_effect=error):
+                    with self.assertRaisesRegex(CollectionError,'MAIL_RENDER_ERROR') as caught:prepare_archive(root)
+                detail=(root/'mail/render-failure.json').read_text()
+                self.assertNotIn('PRIVATE_PATH_AND_MESSAGE',str(caught.exception)+detail)
+                self.assertEqual(json.loads(detail)['mail'],'mail-000000000')
+                self.assertEqual(digest_file(root/'index.html'),old['files']['index.html'])
+                self.assertNotIn('portable_mail',json.loads((root/'manifest.json').read_text()))
+                prepare_archive(root)
+                self.assertFalse((root/'mail/render-failure.json').exists())
+                self.assertTrue(verify_archive(root)['ok'])
 
     @unittest.skipUnless(BROWSER,'Real Chromium required')
     def test_index_click_opens_mail_without_viewer_process_and_downloads_attachment(self):

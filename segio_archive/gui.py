@@ -308,6 +308,11 @@ class App(tk.Tk):
                         if manifest["state"] == "failed":
                             detail = "\n".join(manifest["warnings"][1:][-3:]) or "수집 로그를 확인하세요."
                             messagebox.showerror("수집 실패", detail)
+                        elif manifest.get('portable_mail',{}).get('excluded_parts',0):
+                            excluded=manifest['portable_mail']['excluded_parts']
+                            messagebox.showwarning('백업 완료 · 제외 내역 확인',
+                                f'백업 완료하였습니다.\n보안 차단·손상 부분 {excluded:,}개를 제외했습니다.\n'
+                                '백업 폴더의 mail/render-issues.json과 해당 메일의 안내를 확인하세요.')
                         else:
                             messagebox.showinfo("백업 완료", "백업 완료하였습니다.")
                     else:
