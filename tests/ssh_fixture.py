@@ -12,6 +12,34 @@ import paramiko
 from paramiko import SFTPAttributes,SFTPHandle,SFTPServerInterface,SFTP_OK
 
 
+def metadata_reader(path):
+    """Emulate POSIX open-inode reads across atomic status-file replacement."""
+    if os.name!='nt':
+        return path.open('rb')
+    import ctypes,msvcrt
+    from ctypes import wintypes
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+    create=kernel.CreateFileW
+    create.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,wintypes.LPVOID,
+                     wintypes.DWORD,wintypes.DWORD,wintypes.HANDLE]
+    create.restype=wintypes.HANDLE
+    kernel.CloseHandle.argtypes=[wintypes.HANDLE]
+    # CPython's usual Windows open omits FILE_SHARE_DELETE. A real CentOS
+    # sshd keeps the old inode readable while the worker renames its update.
+    handle=create(str(path),0x80000000,0x7,None,3,0x80,None)
+    if handle==wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        descriptor=msvcrt.open_osfhandle(handle,os.O_RDONLY|os.O_BINARY)
+    except BaseException:
+        kernel.CloseHandle(handle)
+        raise
+    try:return os.fdopen(descriptor,'rb')
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 class FileHandle(SFTPHandle):
     def stat(self):
         return SFTPAttributes.from_stat(os.fstat(self.readfile.fileno()))
@@ -53,9 +81,12 @@ class Files(SFTPServerInterface):
                         relative=os.path.relpath(raw,os.fsencode(self.owner.root)).replace(os.sep.encode(),b'/')
                         item['source_hex']=(b'/files/'+relative).hex()
                 actual.write_text(json.dumps(data),encoding='utf-8')
-            descriptor=os.open(actual,flags,getattr(attr,'st_mode',None) or 0o600)
-            mode='r+b' if flags & os.O_RDWR else 'wb' if flags & os.O_WRONLY else 'rb'
-            stream=os.fdopen(descriptor,mode)
+            if flags==os.O_RDONLY and actual.name in ('status.json','request.json','verified.json','mail-check.json','approval-check.json','transfer.json'):
+                stream=metadata_reader(actual)
+            else:
+                descriptor=os.open(actual,flags,getattr(attr,'st_mode',None) or 0o600)
+                mode='r+b' if flags & os.O_RDWR else 'wb' if flags & os.O_WRONLY else 'rb'
+                stream=os.fdopen(descriptor,mode)
             handle=FileHandle(flags)
             handle.readfile=handle.writefile=stream
             original=handle.read
