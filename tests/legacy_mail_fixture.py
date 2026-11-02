@@ -77,6 +77,21 @@ try:
     assert sources[0]['sha256']==hashlib.sha256(data).hexdigest()
     assert progress[-1]['completed_bytes']==len(data)
     assert progress[-1]['files_done']==1
+    job=os.path.join(root,'.segio-ssh-'+'a'*32)
+    os.mkdir(job,0o700)
+    ssh.write_json(os.path.join(job,'request.json'),
+                   {'protocol':ssh.PROTOCOL,'user':'employee','mail':False,'approvals':True})
+    ssh.write_json(os.path.join(job,'status.json'),{'state':'ready'})
+    check=os.path.join(job,'approval-check.json')
+    ssh.write_json(check,[{'source_hex':ssh.source_hex(path),'identity':list(ssh.fingerprint(path))}]*700)
+    assert os.path.getsize(check)>65536
+    ssh.verify_sources(job)
+    assert ssh.read_json(os.path.join(job,'verified.json'))['ok']
+    with open(path,'ab') as stream: stream.write(b'changed source')
+    try: ssh.verify_sources(job)
+    except worker.SafeError: pass
+    else: raise AssertionError('Source change was not detected')
+    print('LEGACY_LARGE_VERIFY_OK')
     print('LEGACY_SSH_OK')
     print('LEGACY_MAIL_OK')
 finally:

@@ -1,5 +1,6 @@
 """Real loopback Paramiko SSH/SFTP; all server files stay inside a temp root."""
 import json
+import io
 import os
 from pathlib import Path
 import shlex
@@ -7,6 +8,7 @@ import socket
 import stat
 import threading
 import time
+import types
 
 import paramiko
 from paramiko import SFTPAttributes,SFTPHandle,SFTPServerInterface,SFTP_OK
@@ -42,6 +44,8 @@ def metadata_reader(path):
 
 class FileHandle(SFTPHandle):
     def stat(self):
+        if hasattr(self,'snapshot_stat'):
+            return self.snapshot_stat
         return SFTPAttributes.from_stat(os.fstat(self.readfile.fileno()))
 
 
@@ -55,7 +59,8 @@ class Files(SFTPServerInterface):
 
     def stat(self,path):
         try:
-            return SFTPAttributes.from_stat(os.stat(self.path(path)))
+            with self.owner.metadata_lock:
+                return SFTPAttributes.from_stat(os.stat(self.path(path)))
         except OSError as exc:
             return paramiko.SFTPServer.convert_errno(exc.errno)
 
@@ -73,6 +78,7 @@ class Files(SFTPServerInterface):
     def open(self,path,flags,attr):
         try:
             actual=self.path(path)
+            snapshot_stat=None
             if actual.name=='transfer.json' and flags==os.O_RDONLY:
                 data=json.loads(actual.read_text(encoding='utf-8'))
                 for item in data['files']:
@@ -82,12 +88,19 @@ class Files(SFTPServerInterface):
                         item['source_hex']=(b'/files/'+relative).hex()
                 actual.write_text(json.dumps(data),encoding='utf-8')
             if flags==os.O_RDONLY and actual.name in ('status.json','request.json','verified.json','mail-check.json','approval-check.json','transfer.json'):
-                stream=metadata_reader(actual)
+                # Keep a snapshot of the opened inode. Windows stat/read opens
+                # can briefly deny replacement even with FILE_SHARE_DELETE;
+                # serialize those fixture-only opens with the worker rename.
+                with self.owner.metadata_lock,metadata_reader(actual) as source:
+                    snapshot_stat=SFTPAttributes.from_stat(os.fstat(source.fileno()))
+                    stream=io.BytesIO(source.read())
             else:
                 descriptor=os.open(actual,flags,getattr(attr,'st_mode',None) or 0o600)
                 mode='r+b' if flags & os.O_RDWR else 'wb' if flags & os.O_WRONLY else 'rb'
                 stream=os.fdopen(descriptor,mode)
             handle=FileHandle(flags)
+            if snapshot_stat is not None:
+                handle.snapshot_stat=snapshot_stat
             handle.readfile=handle.writefile=stream
             original=handle.read
             def read(offset,length):
@@ -190,7 +203,16 @@ class Access(paramiko.ServerInterface):
                     for field in ('db_config','cell','mail_template'):
                         request[field]=self.owner.path(request[field]).as_posix()
                     request_path.write_text(json.dumps(request),encoding='utf-8')
-                    threading.Thread(target=helper.prepare,args=(str(root),),daemon=True).start()
+                    prepare=helper.prepare
+                    if os.name=='nt':
+                        namespace=prepare.__globals__.copy()
+                        write_json=namespace['write_json']
+                        def serialized_write(path,value):
+                            with self.owner.metadata_lock:
+                                return write_json(path,value)
+                        namespace['write_json']=serialized_write
+                        prepare=types.FunctionType(prepare.__code__,namespace)
+                    threading.Thread(target=prepare,args=(str(root),),daemon=True).start()
                     channel.send_exit_status(0)
                 elif action=='verify':
                     helper.verify_sources(str(root))
@@ -223,6 +245,7 @@ class Access(paramiko.ServerInterface):
 class SSHServer:
     def __init__(self,root,key=None):
         self.root=Path(root).resolve()
+        self.metadata_lock=threading.Lock()
         (self.root/'jobs').mkdir(exist_ok=True)
         self.key=key or paramiko.RSAKey.generate(2048)
         self.reads,self.actions,self.transports=[],[],[]
