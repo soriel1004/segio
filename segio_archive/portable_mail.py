@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from bs4 import BeautifulSoup
+from bs4.exceptions import ParserRejectedMarkup
 
 from .archive import atomic_write, safe_name
 from .compact_mail import digest_file
@@ -180,9 +181,14 @@ def decoded(stream, start, end, encoding, checkpoint):
 def safe_html(text, images):
     soup=BeautifulSoup(text,'html.parser')
     for tag in soup.select('script,style,iframe,object,embed,svg,math,form,template,head'):
-        tag.decompose()
+        if not tag.decomposed:
+            tag.decompose()
     allowed=set('p br div span table thead tbody tfoot tr td th ul ol li strong em b i u s hr blockquote pre code h1 h2 h3 h4 h5 h6 img a'.split())
     for tag in list(soup.find_all(True)):
+        # Broken HTML may give an image children. Removing that image also
+        # detaches its descendants from this previously captured traversal.
+        if tag.decomposed or tag.parent is None:
+            continue
         if tag.name not in allowed:
             tag.unwrap()
             continue
@@ -190,16 +196,20 @@ def safe_html(text, images):
         tag.attrs={}
         if tag.name=='img':
             source=old.get('src','')
-            image=images.get(source[4:].strip('<>')) if source.lower().startswith('cid:') else None
+            image=images.get(source[4:].strip('<>')) if isinstance(source,str) and source.lower().startswith('cid:') else None
             if not image:
-                tag.decompose()
+                # Strip the image while retaining any misplaced text/children.
+                # They are still sanitized by this traversal.
+                tag.unwrap()
                 continue
             tag['src']=image
             tag['alt']=old.get('alt','본문 이미지')
         if tag.name in ('td','th'):
             for name in ('colspan','rowspan'):
-                if str(old.get(name,'')).isdigit():
-                    tag[name]=str(min(1000,int(old[name])))
+                value=str(old.get(name,''))
+                if re.fullmatch(r'[0-9]+',value):
+                    value=value.lstrip('0') or '0'
+                    tag[name]=str(1000 if len(value)>4 else min(1000,int(value)))
     return str(soup)
 
 
@@ -288,8 +298,17 @@ def render_record(root, manifest, stream, record, checkpoint, written=lambda cou
         issues.append({'mail':record['id'],'part':number,'code':code})
         notes.append('보안 프로그램이 차단한 부분을 제외했습니다. 백신 설정은 변경하지 않았습니다.' if code=='security_blocked' else
                      '손상되었거나 해석할 수 없는 본문·첨부 부분을 제외했습니다. 원본 MBOX/EML은 보존되어 있습니다.')
+    rendered=[]
+    for text in rich:
+        checkpoint()
+        try:
+            rendered.append(safe_html(text,images))
+        except (ValueError,ParserRejectedMarkup,RecursionError):
+            rendered.append('<pre>'+html.escape(text)+'</pre>')
+            issues.append({'mail':record['id'],'code':'damaged_html'})
+            notes.append('HTML 형식을 해석하지 못해 해당 본문을 텍스트 형식으로 표시합니다. 원본 MBOX/EML은 보존되어 있습니다.')
     empty_body='본문 바로보기를 생성하지 못했습니다. 제외 안내와 원본을 확인하세요.' if issues else '본문이 없는 메일입니다.'
-    content='\n'.join(safe_html(text,images) for text in rich) if rich else '<pre>'+html.escape('\n'.join(plain) or empty_body)+'</pre>'
+    content='\n'.join(rendered) if rich else '<pre>'+html.escape('\n'.join(plain) or empty_body)+'</pre>'
     attachment_html=''.join('<li><a class="attachment" href="'+html.escape(quote(name,safe='/'),quote=True)+'">'+html.escape(filename)+'</a></li>' for filename,name in attachments)
     if not attachment_html:
         attachment_html='<li>제외된 부분이 있습니다. 위 안내와 원본을 확인하세요.</li>' if issues else '<li>첨부 파일 없음</li>'

@@ -15,7 +15,7 @@ from unittest.mock import patch
 from bs4 import BeautifulSoup
 from segio_archive.archive import verify_archive
 from segio_archive.compact_mail import digest_file
-from segio_archive.portable_mail import prepare_archive,page_path,BLOCK,decoded,MailFormatError
+from segio_archive.portable_mail import prepare_archive,page_path,BLOCK,decoded,MailFormatError,safe_html
 from segio_archive.viewer import Viewer
 from segio_archive.web import Cancelled,CollectionError
 from test_search_page import navigate
@@ -25,6 +25,64 @@ PNG=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42m
 
 
 class PortableMailTests(unittest.TestCase):
+    def test_malformed_nested_images_preserve_text_and_strip_unsafe_descendants(self):
+        samples=[
+            '<img><img src=cid:x /><img / >',
+            '<img src=cid:x /><x>KEEP_TEXT<script>unsafe()</script><img src=https://external.invalid/pixel onerror=unsafe()></x><img / >',
+            '<html><head><style>unsafe</style></head><body><img src=cid:x /><custom>KEEP_TEXT</custom><img / ></body></html>',
+        ]
+        for text in samples:
+            with self.subTest(text=text):
+                rendered=safe_html(text,{})
+                soup=BeautifulSoup(rendered,'html.parser')
+                self.assertIsNone(soup.select_one('img,script,style,custom,x'))
+                self.assertNotIn('unsafe',rendered)
+                self.assertNotIn('external.invalid',rendered)
+                if 'KEEP_TEXT' in text:self.assertIn('KEEP_TEXT',soup.get_text())
+        soup=BeautifulSoup(safe_html('<table><tr><td colspan="'+ '9'*5000 +'" rowspan="²">CELL</td></tr></table>',{}),'html.parser')
+        self.assertEqual(soup.td['colspan'],'1000')
+        self.assertNotIn('rowspan',soup.td.attrs)
+
+    def test_broken_html_mail_renders_following_mail_and_reuses_finished_pages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();self.fixture(root)
+            self.append_messages(root,[b'Subject: Malformed HTML\nContent-Type: text/html; charset=utf-8\n\n'
+                b'<img><img src=cid:x /><custom>VISIBLE_BODY<script>unsafe()</script></custom><img / >',
+                b'Subject: Following mail\nContent-Type: text/plain\n\nFOLLOWING_BODY'])
+            raw=digest_file(root/'mail/raw/000000.mbox')
+            state=root/'mail/offline/mail-000000001/state.json'
+            def stop():
+                if state.exists():raise Cancelled('Synthetic interruption')
+            with self.assertRaises(Cancelled):prepare_archive(root,stop)
+            previous=root/page_path('mail-000000000')
+            os.utime(previous,ns=(1000000000,1000000000))
+            prepare_archive(root)
+            self.assertEqual(previous.stat().st_mtime_ns,1000000000)
+            page=(root/page_path('mail-000000002')).read_text()
+            self.assertIn('VISIBLE_BODY',page)
+            self.assertNotIn('unsafe()',page)
+            self.assertIn('FOLLOWING_BODY',(root/page_path('mail-000000003')).read_text())
+            self.assertEqual(digest_file(root/'mail/raw/000000.mbox'),raw)
+            self.assertTrue(verify_archive(root)['ok'])
+
+    def test_html_format_failure_falls_back_to_escaped_text_and_continues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();old=self.fixture(root)
+            with patch('segio_archive.portable_mail.safe_html',side_effect=ValueError('PRIVATE_HTML_EXCEPTION')):
+                result=prepare_archive(root)
+            page=(root/page_path('mail-000000000')).read_text()
+            soup=BeautifulSoup(page,'html.parser')
+            self.assertIsNone(soup.select_one('script'))
+            self.assertIn('한글 표 내용',soup.get_text())
+            self.assertIn('텍스트 형식',soup.get_text())
+            self.assertNotIn('PRIVATE_HTML_EXCEPTION',page)
+            issues=json.loads((root/'mail/render-issues.json').read_text())['issues']
+            self.assertEqual(issues,[{'mail':'mail-000000000','code':'damaged_html'}])
+            self.assertEqual(result['portable_mail']['affected_messages'],1)
+            self.assertIn('두 번째 본문',(root/page_path('mail-000000001')).read_text())
+            self.assertEqual(digest_file(root/'mail/raw/000000.mbox'),old['files']['mail/raw/000000.mbox'])
+            self.assertTrue(verify_archive(root)['ok'])
+
     def test_base64_truncation_is_reported_without_silently_discarding_trailing_data(self):
         for payload in (b'a',b'YQ==YWJj',b'YQ==\nYQ==',b'YWJj!'):
             with self.subTest(payload=payload),self.assertRaises(MailFormatError):
