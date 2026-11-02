@@ -20,6 +20,16 @@ Windows에서 **서버 관리자 SSH 계정**으로 접속해 지정 직원의 �
 
 서버에 웹 연결 기능을 설치할 필요가 없습니다. 프로그램이 고정 추출 도구를 SSH로 비공개 임시 폴더에 올려 실행합니다. 기존 Python 2.6·psql·DB 설정을 사용하며 DB 암호·인증·원본 파일 권한을 변경하지 않습니다. 서버 관리자 암호·개인키 내용·DB 암호는 Windows 보관본에 저장하지 않습니다.
 
+## v0.4.15 검증 오류·버전 관리·저장 폴더
+
+첨부 검증 목록이 64KB를 넘을 때 서버 추출은 ready인데 전송 후 검증에서 export_failed로 표시되던 오류를 수정했습니다. 생성된 첨부·메일 검증 목록은 요청용 64KB 제한을 적용하지 않습니다. 이미 받은 데이터는 **같은 Windows 저장 상위 폴더·직원 ID와 이전 전송 이어받기 선택**으로 재사용합니다. ready 상태의 이전 서버 작업에서는 검증 도구만 안전하게 갱신하고 다시 추출하지 않습니다. 캐시나 서버 작업 폴더를 지우지 마세요. 검증은 원본 변경 여부를 계속 확인합니다.
+
+SSH 오류는 원래 오류 코드·실패 단계·안전한 예외 종류/코드 위치를 표시합니다. 서버 작업의 last-failure.json에는 암호·ID·문서 내용·예외 원문 없이 진단 분류만 기록합니다. 웹용 last_failure 안내를 SSH 오류에 잘못 표시하던 것도 수정했습니다.
+
+새 Windows 백업은 **segio-ssh-직원ID** 폴더에 저장하며, 예를 들면 `D:/백업/segio-ssh-koro/index.html`입니다. 선택한 저장 상위 폴더 아래에 만들고, 기존 폴더·ZIP이 있으면 -2, -3을 붙여 보존합니다. 기존 백업은 이름을 바꾸지 않습니다.
+
+프로그램 버전은 **EXE 우클릭 → 속성 → 자세히 → 파일 버전·제품 버전**, 동봉 **VERSION.txt**에서 확인합니다. VERSION.txt에는 빌드 커밋·UTC 빌드 시각도 들어갑니다. 새 백업 manifest.json에도 collector_version을 기록합니다. 표시·EXE 리소스·설치 메타데이터는 segio_archive.__version__을 공통 기준으로 사용합니다. 다운로드 ZIP을 한 번 푸는 배포 방식은 유지합니다.
+
 ## 서버 공간·50GB 이상 백업 (v0.4.14)
 
 Windows 화면의 **서버 작업 폴더 기본값은 `/backup`**입니다. 실제 작업은 `/backup/.segio-ssh-작업번호`에 만들고 로그에 경로를 표시합니다. 기존 `/tmp`의 실패 작업은 이어받기 상태를 확인한 뒤 새 작업 경로에서 다시 추출하며, 성공 후 해당 실패 작업도 정리합니다. CLI는 `--work-base /backup`으로 지정합니다. `/backup` 상위 폴더가 없으면 SSH 실행 계정으로 생성하며 기존 폴더의 권한은 변경하지 않습니다.
@@ -109,7 +119,7 @@ v0.4.7의 백업 완료 팝업은 **“백업 완료하였습니다.”**입니�
 ## 보관되는 자료
 
 ```text
-segio-koro/
+segio-ssh-koro/
   index.html                   검색·열람 시작 화면
   search/part-*.js             파일 직접 열기용 분할 검색 자료
   catalog.sqlite3              검색 DB·결재 원본 기록·메일 위치
@@ -132,8 +142,8 @@ segio-koro/
 
 ```bash
 python -m segio_archive collect-ssh --host 192.168.0.100 --port 22 --ssh-user root --user koro --output archives
-python -m segio_archive view archives/segio-koro
-python -m segio_archive verify archives/segio-koro
+python -m segio_archive view archives/segio-ssh-koro
+python -m segio_archive verify archives/segio-ssh-koro
 ```
 
 SSH 암호는 실행 후 숨김 입력합니다. `--key-file`, `--zip`, `--fresh`, `--no-mail`, `--no-approvals`를 지원합니다. 서버 경로 옵션은 [SSH 안내](docs/SSH_ARCHIVE.md)를 보세요. 경고가 있는 정상 수집은 종료 코드 2이며 받은 자료는 보관됩니다.

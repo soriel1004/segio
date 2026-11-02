@@ -20,7 +20,7 @@ from urllib.parse import quote
 
 from segio_archive.archive import verify_archive
 from segio_archive.compact_mail import build_compact_catalog,mbox_spans,search,mail_record
-from segio_archive.ssh_client import SSHConfig,SSHCollector,WORK_SCRIPT,WORK_PROTOCOL
+from segio_archive.ssh_client import SSHConfig,SSHCollector,WORK_SCRIPT,WORK_PROTOCOL,ssh_failure_message
 from segio_archive.viewer import Viewer
 from segio_archive.web import Cancelled,CollectionError
 from live_fixtures import synthetic_export
@@ -311,6 +311,37 @@ class SSHArchiveTests(unittest.TestCase):
             self.assertEqual(server.workspace_requests,['/tmp','/backup'])
             self.assertEqual((root/'home/e/employee/mbox/inbox.mbox').read_bytes(),original)
 
+    def test_ready_job_refreshes_verifier_and_reuses_already_downloaded_files(self):
+        from export_schema_from_segio_config import SafeError
+        from segio_archive import __version__
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config,_=self.fixture(root)
+            first=SSHCollector(config,confirm_host=lambda *_:True)
+            with patch.object(helper,'run_export',side_effect=synthetic_export),patch.object(helper,'verify_sources',side_effect=SafeError('invalid_metadata')):
+                with self.assertRaisesRegex(CollectionError,'invalid_metadata'):
+                    first.run('SYNTHETIC_SSH_PASSWORD')
+            job=server.path(first.remote)
+            self.assertEqual(json.loads((job/'status.json').read_text())['state'],'ready')
+            (job/'remote_ssh_export.py').write_bytes(b'OLD_VERIFIER_TO_BE_REPLACED')
+            reads=len(server.reads)
+            result=SSHCollector(config).run('SYNTHETIC_SSH_PASSWORD')
+            self.assertEqual(server.actions.count('prepare'),1)
+            self.assertEqual(server.reads[reads:],[])
+            self.assertEqual(result.name,'segio-ssh-employee')
+            self.assertEqual(json.loads((result/'manifest.json').read_text())['collector_version'],__version__)
+            self.assertTrue(verify_archive(result)['ok'])
+
+    def test_ssh_error_message_preserves_code_stage_and_only_safe_diagnostic_fields(self):
+        message=ssh_failure_message('invalid_metadata',{'stage':'verification','exception_type':'SafeError',
+            'errno':None,'site':{'function':'read_json','line':120,'private':'PRIVATE_SECRET'},
+            'message':'PRIVATE_SECRET'},'local')
+        self.assertIn('[invalid_metadata]',message)
+        self.assertIn('서버 원본 변경 검사',message)
+        self.assertIn('read_json:120',message)
+        self.assertNotIn('last_failure',message)
+        self.assertNotIn('PRIVATE_SECRET',message)
+        self.assertNotIn('PRIVATE_SECRET',ssh_failure_message('PRIVATE_SECRET',{'stage':'PRIVATE_SECRET','exception_type':'PRIVATE_SECRET'},'safe phase'))
+
     def test_changed_host_key_is_rejected_before_credentials_or_new_job(self):
         import paramiko
         with tempfile.TemporaryDirectory() as tmp:
@@ -360,6 +391,22 @@ class SSHArchiveTests(unittest.TestCase):
 
 
 class CompactMailTests(unittest.TestCase):
+    def test_large_generated_approval_verification_list_is_not_limited_to_64k(self):
+        from export_schema_from_segio_config import SafeError
+        with tempfile.TemporaryDirectory() as tmp:
+            base=Path(tmp).resolve();root=base/('.segio-ssh-'+'a'*32);root.mkdir(mode=0o700)
+            source=base/'synthetic-attachment';source.write_bytes(b'SYNTHETIC_SOURCE')
+            helper.write_json(str(root/'request.json'),{'protocol':helper.PROTOCOL,'user':'employee','mail':False,'approvals':True})
+            helper.write_json(str(root/'status.json'),{'protocol':helper.PROTOCOL,'state':'ready'})
+            entry={'source_hex':helper.source_hex(str(source)),'identity':list(helper.fingerprint(str(source)))}
+            helper.write_json(str(root/'approval-check.json'),[entry]*700)
+            self.assertGreater((root/'approval-check.json').stat().st_size,65536)
+            helper.verify_sources(str(root))
+            self.assertTrue(json.loads((root/'verified.json').read_text())['ok'])
+            (root/'verified.json').unlink();source.write_bytes(b'CHANGED_SOURCE')
+            with self.assertRaises(SafeError):helper.verify_sources(str(root))
+            self.assertFalse((root/'verified.json').exists())
+
     def test_ssh_hash_snapshot_retries_new_files_and_reuses_stable_hashes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve()

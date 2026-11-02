@@ -145,10 +145,10 @@ def unpack_verified(source: Path, destination: Path, username: str, checkpoint=l
     return manifest
 
 
-def publish_local(staging, archive, output, username):
+def publish_local(staging, archive, output, username, prefix="segio-"):
     """Reserve a short name without replacing either an existing ZIP or folder."""
     for number in range(1, 100000):
-        name = 'segio-' + safe_name(username, 100) + (f'-{number}' if number>1 else '')
+        name = prefix + safe_name(username, 100) + (f'-{number}' if number>1 else '')
         folder, zipped = output/name, output/(name+'.zip')
         if folder.exists():
             continue
@@ -396,6 +396,7 @@ class DBCollector(PreparedDBCollector):
             'empty_selection':'서버에 결재 문서·메일 중 선택한 수집 항목이 전달되지 않았습니다. [empty_selection]',
             'job_status_unavailable':'서버 추출 작업의 상태 파일을 읽지 못했습니다. [job_status_unavailable]',
             'job_not_found':'요청한 서버 추출 작업이 없거나 로그인 계정과 일치하지 않습니다. [job_not_found]',
+            'invalid_metadata':'서버 추출 검증 목록을 읽지 못했습니다. 검증 도구를 최신 버전으로 갱신하세요. [invalid_metadata]',
             'invalid_job':'서버 추출 작업 번호가 올바르지 않습니다. [invalid_job]',
             'export_not_ready':'서버 추출 작업이 아직 완료되지 않았습니다. [export_not_ready]',
             'archive_unavailable':'완성된 서버 ZIP을 읽지 못했거나 크기가 달라졌습니다. [archive_unavailable]',

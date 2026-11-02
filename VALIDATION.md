@@ -1,5 +1,15 @@
 # 검증 결과
 
+## v0.4.15 전송 후 검증 오류·파일 버전·SSH 저장 폴더
+
+운영 보고는 Python 2.6.6, 최신 작업 ready/mail이며 사진은 SFTP 5.92 GiB 전송 뒤 서버 원본 변경 검사에서 실패한 상태입니다. 64 KiB를 초과한 approval-check.json을 기본 read_json 한도로 읽어 invalid_metadata가 발생하는 경로를 합성 116,200바이트 목록으로 재현했습니다. 기존 클라이언트가 미등록 코드를 웹용 export_failed/last_failure 안내로 바꾸던 문제도 확인했습니다. 서버가 생성한 첨부·메일 검증 목록만 크기 한도를 해제하고, 요청·상태·설정의 제한은 유지합니다. Python 2 계열에서도 hex 경로를 명시적 ASCII 바이트로 변환합니다. 원본 파일 변경 검사는 그대로 수행합니다.
+
+새 클라이언트는 ready 작업의 직원·프로토콜을 확인한 후 remote_ssh_export.py를 임시 업로드와 SFTP posix-rename으로 원자적으로 갱신합니다. 기존 Windows 캐시·서버 추출 결과를 유지하여 원본 재전송 없이 검증을 다시 진행합니다. 전송 도중 queued/running 작업의 코드는 교체하지 않습니다. 실패 메시지는 실제 코드·단계·허용된 예외 종류/함수/줄 번호를 표시하며 암호·ID·문서·예외 원문을 포함하지 않습니다. SSH 작업의 last-failure.json에도 같은 비공개 분류를 기록합니다.
+
+새 SSH 결과 폴더·선택 ZIP의 기본 이름은 segio-ssh-직원ID이며 중복 시 번호를 붙여 기존 결과를 보존합니다. 기존 web/DB 다운로드의 기본 이름은 유지합니다. 새 manifest에는 collector_version을 기록합니다. 프로그램 이름·버전은 segio_archive.__version__/APPLICATION_NAME에서 참조하고 setuptools 버전도 동적으로 참조합니다. Windows 빌드에서 EXE VERSIONINFO의 FileVersion/ProductVersion과 VERSION.txt를 생성하며, 빌드 후 실제 FileVersionInfo가 앱 버전과 일치하는지 확인합니다. VERSION.txt에는 빌드 커밋·UTC 시각을 포함하고 단일 ZIP의 루트에 동봉합니다.
+
+로컬 전체 153개 검사는 실패·오류 없이 끝났습니다. GUI 3개·관리형 Chromium file URL 정책 9개·선택 Python 2.6 런타임 부재 1개를 건너뛰었습니다. 관련 SSH 18개도 통과했고, 64KB 초과 목록 검증 및 변경 탐지·오류 상세의 비공개 값 제거·ready 상태의 도구 갱신·prepare 1회 유지·이미 받은 메일의 SFTP 읽기 0회·새 폴더명·기록된 버전·최종 해시를 검사했습니다. v0.4.15 wheel을 빌드하여 동적 패키지 버전과 오프라인 리소스 포함을 확인했고 Windows 리소스 입력과 VERSION.txt 생성도 확인했습니다. 실제 운영 5.92 GiB 캐시나 서버 원본은 이 환경에서 직접 변경하지 않았습니다. 로컬에 실제 Python 2.6 실행기는 없으며 공식 소스 다운로드는 접근 제한으로 수행하지 못했습니다.
+
 ## Windows ZIP 포장 한 번으로 변경
 
 빌드에서 미리 ZIP을 생성하는 단계를 제거했습니다. GitHub Actions에 실행 파일 폴더 내용 자체를 업로드하여 다운로드 ZIP 안에 다시 배포 ZIP이 들어가지 않도록 했습니다. 한 번 풀면 SEGIOArchive.exe·_internal·tools가 바로 나옵니다. 숨김 리소스를 포함하도록 설정해 Playwright의 동봉 브라우저도 보존합니다. 업로드 전 실행 파일·런타임·SSH 도구·브라우저 편집기 리소스 존재를 검사합니다. 프로그램 본체는 v0.4.14와 같으며 /backup 및 서버 정리 변경을 포함합니다. Windows 시험 한 건이 장시간 정체돼 새 실행으로 다시 확인하며, CI가 중단돼도 마지막으로 실행한 검사 이름을 남기도록 진행 요약 기록을 추가했습니다. 후속 Windows 검사에서 상태 JSON을 읽는 SFTP 핸들이 원자적 파일 교체를 막는 경우를 확인했습니다. Windows 테스트 서버의 제어 파일 읽기에 FILE_SHARE_DELETE를 지정해 실제 CentOS의 열린 inode 교체 동작을 재현했습니다. 운영 서버 코드·권한은 변경하지 않았으며 로컬 SSH 관련 15개 검사는 다시 통과했습니다.

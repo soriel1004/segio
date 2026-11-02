@@ -20,6 +20,7 @@ import zipfile
 
 import paramiko
 
+from . import __version__
 from .archive import atomic_write
 from .compact_mail import build_compact_catalog, digest_file
 from .db_client import DBCollector, publish_local, safe_member
@@ -63,6 +64,41 @@ print(json.dumps({'protocol':'segio-ssh-check/1','ok':True,'ready':ready,
 '''
 TOOLS = ('remote_ssh_export.py','live_export_worker.py','export_approval_db.py',
          'export_schema_from_segio_config.py','approval_db_columns.json','db_archive_index.html')
+
+
+def ssh_failure_message(code, diagnostic=None, phase=''):
+    codes={'export_failed','invalid_metadata','unsafe_job','invalid_identity','export_not_ready',
+        'server_disk_full','server_access_denied','server_file_missing','server_file_too_large',
+        'mail_changed_retry','mail_unsafe_file','mail_unsafe_symlink','mail_path_unconfigured',
+        'mail_path_missing_or_symlink','job_storage_failed','db_config_invalid','db_config_unreadable',
+        'psql_unavailable','db_authentication_failed','db_permission_denied','db_schema_mismatch',
+        'db_query_timeout','db_database_missing','db_connection_failed','db_query_failed',
+        'db_snapshot_mismatch','approval_user_not_found','cell_data_missing','db_encoding_failed'}
+    code=code if isinstance(code,str) and code in codes else 'export_failed'
+    message=DBCollector.error_message(code)
+    if '[export_failed]' in message:
+        message='SSH 서버 작업을 완료하지 못했습니다. 작업 폴더의 진단 기록을 확인하세요. ['+code+']'
+    diagnostic=diagnostic if isinstance(diagnostic,dict) else {}
+    stages={'initializing':'서버 작업 준비','database':'결재 DB 추출','mail':'메일 원본 검사',
+            'verification':'서버 원본 변경 검사','cleanup':'서버 임시 작업 정리'}
+    raw_stage=diagnostic.get('stage')
+    stage=stages.get(raw_stage,phase) if isinstance(raw_stage,str) else phase
+    if stage:message+='\n실패 단계: '+stage
+    kinds={'SafeError','TypeError','ValueError','KeyError','AttributeError','MemoryError','OverflowError',
+           'RuntimeError','IOError','OSError','FileNotFoundError','PermissionError',
+           'UnicodeEncodeError','UnicodeDecodeError','UnicodeError'}
+    details=[]
+    if isinstance(diagnostic.get('exception_type'),str) and diagnostic['exception_type'] in kinds:details.append(diagnostic['exception_type'])
+    number=diagnostic.get('errno')
+    if type(number) is int and 0<=number<=4096:details.append('errno='+str(number))
+    site=diagnostic.get('site')
+    functions={'prepare','verify_sources','read_json','write_json','run_export','reference_file','hash_file',
+               'fingerprint','inventory','render_bundle','attachment','local_file','image','freeze',
+               'query_database','psql_readonly','read_rows','private_root','text'}
+    if isinstance(site,dict) and isinstance(site.get('function'),str) and site['function'] in functions and type(site.get('line')) is int and 0<site['line']<1000000:
+        details.append(site['function']+':'+str(site['line']))
+    if details:message+='\n진단: '+' · '.join(details)
+    return message
 
 
 @dataclass
@@ -187,7 +223,7 @@ class SSHCollector:
             except (ValueError,UnicodeError):
                 raise CollectionError('서버 작업기 응답을 확인하지 못했습니다. 서버 Python 경로와 실행 권한을 확인하세요. [SSH_HELPER_RESPONSE]') from None
             if value.get('protocol') != protocol or code or value.get('ok') is not True:
-                raise CollectionError(DBCollector.error_message(value.get('error')))
+                raise CollectionError(ssh_failure_message(value.get('error'),value.get('diagnostic'),self.phase))
             return value
         finally:
             channel.close()
@@ -270,6 +306,8 @@ class SSHCollector:
             if status.get('protocol')!=PROTOCOL:
                 raise CollectionError('SSH 이전 작업 상태를 확인하세요.')
             if status.get('state')!='failed':
+                if status.get('state')=='ready':
+                    self.refresh_ready_helper()
                 self.log('이전 SSH 작업에 연결해 전송을 이어갑니다. 작업 경로: '+self.remote)
                 return
             self.retired.append(self.remote)
@@ -297,6 +335,24 @@ class SSHCollector:
         atomic_write(state_path,json.dumps({'remote':self.remote,'protocol':PROTOCOL,'retired':self.retired}).encode())
         os.chmod(state_path,0o600)
         self.execute('prepare',detach=True)
+
+    def refresh_ready_helper(self):
+        """Repair verification in a finished server job without re-extracting it."""
+        request=self.read_json(self.remote+'/request.json',65536)
+        if request.get('protocol')!=PROTOCOL or request.get('user')!=self.config.username:
+            raise CollectionError('이어받을 SSH 작업의 직원이 일치하지 않습니다.')
+        tools=self.config.tools_dir or (Path(sys.executable).parent/'tools' if getattr(sys,'frozen',False) else Path(__file__).resolve().parents[1]/'tools')
+        temporary=self.remote+'/.verification-'+secrets.token_hex(8)+'.py'
+        self.sftp.put(str(tools/'remote_ssh_export.py'),temporary)
+        self.sftp.chmod(temporary,0o600)
+        try:
+            self.sftp.posix_rename(temporary,self.remote+'/remote_ssh_export.py')
+        except OSError:
+            # Keep the original helper and all downloaded data intact.
+            try:self.sftp.remove(temporary)
+            except OSError:pass
+            raise CollectionError('서버 검증 도구를 안전하게 갱신하지 못했습니다. 내려받은 파일은 보존했습니다. [SSH_HELPER_UPDATE_FAILED]') from None
+        self.log('완료된 서버 작업의 검증 도구를 갱신했습니다. 기존 전송 파일을 재사용합니다.')
 
     @staticmethod
     def valid_remote(path):
@@ -415,7 +471,7 @@ class SSHCollector:
                          f'{status.get("files_done",0):,} / {status.get("files_total",0):,}개 · 시도 {status.get("attempt",1)} / 3')
                 reported=time.monotonic()
             if status.get('state') == 'failed':
-                raise CollectionError(DBCollector.error_message(status.get('code')))
+                raise CollectionError(ssh_failure_message(status.get('code'),status.get('diagnostic'),self.phase))
             if status.get('state') == 'ready':
                 self.report('server',1,1,'steps','서버 추출 준비 완료',force=True)
                 return
@@ -536,6 +592,9 @@ class SSHCollector:
             self.transfer(contents)
             self.begin_stage('verify')
             self.execute('verify')
+            local_manifest=json.loads((contents/'manifest.json').read_text(encoding='utf-8'))
+            local_manifest['collector_version']=__version__
+            atomic_write(contents/'manifest.json',json.dumps(local_manifest,ensure_ascii=False,indent=2).encode('utf-8'))
             self.phase='Windows 검색 색인 생성'
             self.log('메일 검색 DB와 바로보기 HTML·첨부를 만드는 중 · 추가 저장 공간이 필요합니다')
             build_compact_catalog(contents,self.config.username,self.checkpoint,self.log,progress=self.forward_progress)
@@ -560,7 +619,7 @@ class SSHCollector:
                 self.report('zip',zipped_bytes,size,'bytes','ZIP 생성 완료',force=True)
             self.checkpoint()
             self.begin_stage('publish')
-            result=publish_local(contents,archive,output,self.config.username)
+            result=publish_local(contents,archive,output,self.config.username,prefix='segio-ssh-')
             self.begin_stage('cleanup')
             record={'identity':self.cleanup_identity(),'backup':str(result),
                     'job':posixpath.basename(self.remote),'paths':list(dict.fromkeys([self.remote]+self.retired)),

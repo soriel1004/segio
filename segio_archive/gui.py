@@ -10,10 +10,10 @@ from tkinter import filedialog, messagebox, ttk
 
 from .archive import verify_archive, STATES
 from .web import CollectionError
-from . import __version__
+from . import __version__, APPLICATION_NAME
 from .progress import ProgressState
 
-APP_TITLE = "그룹웨어 문서 및 메일 백업 및 검색"
+APP_TITLE = APPLICATION_NAME
 
 
 class App(tk.Tk):

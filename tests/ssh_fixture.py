@@ -119,6 +119,10 @@ class Files(SFTPServerInterface):
             value=os.fsdecode(path);os.unlink(self.owner.path(os.path.dirname(value))/os.path.basename(value));return SFTP_OK
         except OSError as exc:return paramiko.SFTPServer.convert_errno(exc.errno)
 
+    def posix_rename(self,oldpath,newpath):
+        try:os.replace(self.path(oldpath),self.path(newpath));return SFTP_OK
+        except OSError as exc:return paramiko.SFTPServer.convert_errno(exc.errno)
+
     def rmdir(self,path):
         try:os.rmdir(self.path(path));return SFTP_OK
         except OSError as exc:return paramiko.SFTPServer.convert_errno(exc.errno)

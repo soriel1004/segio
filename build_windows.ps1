@@ -11,15 +11,26 @@ Check-Exit
 $env:PLAYWRIGHT_BROWSERS_PATH = "0"
 & $python -m playwright install chromium
 Check-Exit
-& $python -m PyInstaller --noconfirm --clean --onedir --windowed --name SEGIOArchive --collect-all playwright --collect-all bs4 --collect-all paramiko --collect-data segio_archive launch.py
+& $python tools/write_windows_version.py --resource build/windows-version-info.txt --text build/VERSION.txt
 Check-Exit
+& $python -m PyInstaller --noconfirm --clean --onedir --windowed --name SEGIOArchive --version-file build/windows-version-info.txt --collect-all playwright --collect-all bs4 --collect-all paramiko --collect-data segio_archive launch.py
+Check-Exit
+Copy-Item build\VERSION.txt dist\SEGIOArchive\VERSION.txt
 Copy-Item README.md dist\SEGIOArchive\README.md
 Copy-Item docs dist\SEGIOArchive\docs -Recurse
 New-Item -ItemType Directory -Force -Path dist\SEGIOArchive\tools | Out-Null
 Get-ChildItem tools -File | Copy-Item -Destination dist\SEGIOArchive\tools
 # GitHub Actions creates the only downloadable ZIP from this folder.
 if (Test-Path "dist\SEGIOArchive\SEGIOArchive-Windows.zip") { throw "Nested distribution ZIP must not be included." }
-foreach ($required in @("SEGIOArchive.exe", "_internal", "tools\remote_ssh_export.py", "_internal\segio_archive\browser_assets\delete.js")) {
+foreach ($required in @("SEGIOArchive.exe", "VERSION.txt", "_internal", "tools\remote_ssh_export.py", "_internal\segio_archive\browser_assets\delete.js")) {
     if (-not (Test-Path (Join-Path "dist\SEGIOArchive" $required))) { throw "Missing package entry: $required" }
 }
 Write-Host "Built dist\SEGIOArchive. GitHub download requires one extraction; keep all files beside SEGIOArchive.exe."
+
+$expectedVersion = (& $python -c "from segio_archive import __version__; print(__version__)").Trim()
+Check-Exit
+$versionInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path "dist\SEGIOArchive\SEGIOArchive.exe"))
+if ($versionInfo.FileVersion -ne $expectedVersion -or $versionInfo.ProductVersion -ne $expectedVersion) {
+    throw "Windows executable version does not match the application version."
+}
+Write-Host "Verified EXE file/product version: $expectedVersion"

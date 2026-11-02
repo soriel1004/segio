@@ -212,3 +212,7 @@ python ./install_live_archive.py --web-user segio \
 직접 Python 실행은 정상이고 PHP에서 종료 코드를 잃는 경우가 확인되었습니다. PHP와 Python 작업기를 **같은 새 공용 묶음**으로 설치해야 합니다. 작업기는 `--bridge-control`을 사용할 때만 구조화된 성공·접수 응답을 내보내며 기존 `--random-token` 단독 호출은 그대로 32자리 난수를 출력합니다. SSH 업로드 파일 목록과 기존 SSH 프로토콜도 유지합니다.
 
 새 PHP 파일을 서비스에 반영하려면 업무 접속에 영향을 주지 않는 시간에 `/etc/init.d/shttpd restart`를 실행하고 프로그램을 다시 시작합니다. 접속 중인 사용자의 연결은 잠시 끊길 수 있습니다. 이 재시작은 설치 명령이 자동으로 수행하지 않습니다. 수집 완료는 기존 준비 상태·다운로드·해시 검증으로 별도 확인합니다.
+
+## SSH 검증 목록 수정 (v0.4.15)
+
+SSH 작업의 서버 생성 approval-check.json·mail-check.json에는 요청용 64KB 한도를 적용하지 않습니다. 첨부 목록이 큰 작업의 전송 후 invalid_metadata 오류를 수정했으며 요청·상태·설정의 작은 제어 파일 한도는 유지합니다. 새 SSH 클라이언트는 ready 작업의 검증 helper만 원자적으로 갱신해 전송 캐시를 재사용합니다. 실패 진단은 예외 원문 없이 last-failure.json에 기록합니다. 기본 웹 수집 규약과 추출 동작은 유지합니다. write_windows_version.py는 Windows 빌드 전용이며 서버에 업로드하는 6개 도구에는 포함하지 않습니다.

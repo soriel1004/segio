@@ -16,9 +16,43 @@ from optparse import OptionParser
 from export_approval_db import run_export
 from export_schema_from_segio_config import SafeError
 from live_export_worker import (read_json, write_json, check_user, mail_path, inventory,
-                                fingerprint, file_identity, failure_details)
+                                fingerprint, file_identity, failure_details as worker_failure_details)
 
 PROTOCOL = 'segio-ssh-archive/1'
+REVISION = 'ssh-verification-metadata-2'
+
+
+def failure_details(exc, stage):
+    code, diagnostic = worker_failure_details(exc, stage)
+    kinds = ('SafeError', 'TypeError', 'ValueError', 'KeyError', 'AttributeError',
+             'MemoryError', 'OverflowError', 'RuntimeError', 'IOError', 'OSError',
+             'FileNotFoundError', 'PermissionError', 'UnicodeEncodeError',
+             'UnicodeDecodeError', 'UnicodeError')
+    kind = type(exc).__name__
+    diagnostic['exception_type'] = kind if kind in kinds else 'unknown'
+    modules = ('remote_ssh_export.py', 'live_export_worker.py', 'export_approval_db.py',
+               'export_schema_from_segio_config.py')
+    functions = ('prepare', 'verify_sources', 'read_json', 'write_json', 'run_export',
+                 'reference_file', 'hash_file', 'fingerprint', 'inventory',
+                 'render_bundle', 'attachment', 'local_file', 'image', 'freeze',
+                 'query_database', 'psql_readonly', 'read_rows', 'private_root', 'text')
+    trace = sys.exc_info()[2]
+    while trace is not None:
+        frame = trace.tb_frame
+        module = os.path.basename(frame.f_code.co_filename)
+        function = frame.f_code.co_name
+        if module in modules and function in functions:
+            diagnostic['site'] = {'module': module, 'function': function, 'line': trace.tb_lineno}
+        trace = trace.tb_next
+    return code, diagnostic
+
+
+def save_failure(root, code, diagnostic):
+    try:
+        write_json(os.path.join(root, 'last-failure.json'),
+                   {'protocol': PROTOCOL, 'revision': REVISION, 'code': code, 'diagnostic': diagnostic})
+    except (IOError, OSError):
+        pass  # A full/unwritable disk must not hide the original failure.
 
 
 def source_hex(path):
@@ -128,7 +162,7 @@ def prepare(root):
         reference_checks.append({'source_hex': source_hex(path), 'identity': list(identity)})
         return details
     def status(state, **fields):
-        value = {'protocol': PROTOCOL, 'state': state, 'stage': stage}
+        value = {'protocol': PROTOCOL, 'revision': REVISION, 'state': state, 'stage': stage}
         value.update(fields)
         write_json(status_path, value)
     try:
@@ -188,6 +222,7 @@ def prepare(root):
         status('ready', files=len(transfers), bytes=sum(item['bytes'] for item in transfers))
     except Exception as exc:
         code, diagnostic = failure_details(exc, stage)
+        save_failure(root, code, diagnostic)
         status('failed', code=code, diagnostic=diagnostic)
 
 
@@ -195,19 +230,21 @@ def verify_sources(root):
     root, request = private_root(root)
     if read_json(os.path.join(root, 'status.json')).get('state') != 'ready':
         raise SafeError('export_not_ready')
-    for entry in read_json(os.path.join(root, 'approval-check.json')) if os.path.isfile(os.path.join(root, 'approval-check.json')) else []:
-        path = binascii.unhexlify(entry['source_hex'])
+    # These lists are generated inside this owned private job. They routinely
+    # exceed the 64 KiB bound used for untrusted requests/control messages.
+    for entry in read_json(os.path.join(root, 'approval-check.json'), None) if os.path.isfile(os.path.join(root, 'approval-check.json')) else []:
+        path = binascii.unhexlify(entry['source_hex'].encode('ascii'))
         if list(fingerprint(path)) != entry['identity']:
             raise SafeError('mail_changed_retry')
     if request['mail']:
-        before = read_json(os.path.join(root, 'mail-check.json'), 64 * 1024 * 1024)
+        before = read_json(os.path.join(root, 'mail-check.json'), None)
         actual = []
         for name, path, identity in inventory(mail_path(request['mail_template'], request['user'])):
             raw_name = name if isinstance(name, bytes) else name.encode(sys.getfilesystemencoding(), 'surrogateescape')
             actual.append({'name_hex': binascii.hexlify(raw_name).decode('ascii'), 'identity': list(identity)})
         if actual != before:
             raise SafeError('mail_changed_retry')
-    write_json(os.path.join(root, 'verified.json'), {'protocol': PROTOCOL, 'ok': True})
+    write_json(os.path.join(root, 'verified.json'), {'protocol': PROTOCOL, 'ok': True, 'revision': REVISION})
 
 
 def main():
@@ -245,7 +282,11 @@ def main():
             print(json.dumps({'protocol': PROTOCOL, 'ok': True}))
         return 0
     except Exception as exc:
-        code, diagnostic = failure_details(exc, 'initializing')
+        stage = {'verify': 'verification', 'cleanup': 'cleanup'}.get(options.action, 'initializing')
+        code, diagnostic = failure_details(exc, stage)
+        # Persist only after ownership and the native request have been checked.
+        if 'root' in locals() and 'request' in locals():
+            save_failure(root, code, diagnostic)
         print(json.dumps({'protocol': PROTOCOL, 'error': code, 'diagnostic': diagnostic}))
         return 1
 
