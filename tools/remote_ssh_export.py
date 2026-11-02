@@ -120,6 +120,13 @@ def prepare(root):
     root, request = private_root(root)
     status_path = os.path.join(root, 'status.json')
     stage = 'initializing'
+    references, reference_checks = {}, []
+    def reference_file(path, relative):
+        identity = fingerprint(path)
+        details = hash_file(path, identity)
+        references[relative] = dict(details, path=relative, source_hex=source_hex(path))
+        reference_checks.append({'source_hex': source_hex(path), 'identity': list(identity)})
+        return details
     def status(state, **fields):
         value = {'protocol': PROTOCOL, 'state': state, 'stage': stage}
         value.update(fields)
@@ -130,7 +137,7 @@ def prepare(root):
             stage = 'database'
             status('running')
             folder, archive = run_export(request['db_config'], user, root, cell=request['cell'],
-                                         binary=request['psql'], live_scope=True, pack=False)
+                                         binary=request['psql'], live_scope=True, pack=False, reference_file=reference_file)
             if archive:
                 os.unlink(archive)
             manifest = read_json(os.path.join(folder, 'manifest.json'), None)
@@ -146,11 +153,13 @@ def prepare(root):
                 'coverage': [], 'warnings': [], 'snapshot_rows': {}}
             for name in ('catalog.json', 'index.html'):
                 manifest['files'][name] = hash_file(os.path.join(folder, name))
-        transfers, sources = [], []
+        write_json(os.path.join(root, 'approval-check.json'), reference_checks)
+        transfers, sources = list(references.values()), []
         if request['mail']:
             stage = 'mail'
             status('running', files_done=0)
-            sources,transfers,identities=mail_snapshot(request,status)
+            sources,mail_transfers,identities=mail_snapshot(request,status)
+            transfers.extend(mail_transfers)
             for source in sources:
                 manifest['files'][source['path']]=dict((key,source[key]) for key in ('bytes','sha256'))
             write_json(os.path.join(root, 'mail-check.json'), identities)
@@ -161,14 +170,15 @@ def prepare(root):
             manifest['files']['mail/sources.json'] = hash_file(source_file)
         manifest['finished_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         manifest['ssh_export'] = {'protocol': PROTOCOL, 'job': os.path.basename(root),
-            'approvals': request['approvals'], 'mail': request['mail'], 'authentication': 'administrator_ssh'}
+            'approvals': request['approvals'], 'mail': request['mail'], 'authentication': 'administrator_ssh',
+            'source_transfer': 'direct-mail-and-attachments/1'}
         manifest['warnings'].append('Export requested by SSH administrator; employee password was not verified.')
         manifest['counts']['mail_files'] = len(sources)
         manifest['coverage'].append({'kind': 'mail', 'status': 'direct_source_transfer', 'files': len(sources)})
         manifest_path = os.path.join(folder, 'manifest.json')
         write_json(manifest_path, manifest)
         for name in sorted(manifest['files']):
-            if name.startswith('mail/raw/'):
+            if name.startswith('mail/raw/') or name in references:
                 continue
             transfers.append(dict(manifest['files'][name], path=name,
                                   source_hex=source_hex(os.path.join(folder, *name.split('/')))))
@@ -185,6 +195,10 @@ def verify_sources(root):
     root, request = private_root(root)
     if read_json(os.path.join(root, 'status.json')).get('state') != 'ready':
         raise SafeError('export_not_ready')
+    for entry in read_json(os.path.join(root, 'approval-check.json')) if os.path.isfile(os.path.join(root, 'approval-check.json')) else []:
+        path = binascii.unhexlify(entry['source_hex'])
+        if list(fingerprint(path)) != entry['identity']:
+            raise SafeError('mail_changed_retry')
     if request['mail']:
         before = read_json(os.path.join(root, 'mail-check.json'), 64 * 1024 * 1024)
         actual = []
@@ -225,6 +239,8 @@ def main():
             if read_json(os.path.join(root, 'verified.json')).get('ok') is not True:
                 raise SafeError('unsafe_job')
             shutil.rmtree(root)
+            if os.path.lexists(root):
+                raise SafeError('job_storage_failed')
         if not options.detach:
             print(json.dumps({'protocol': PROTOCOL, 'ok': True}))
         return 0

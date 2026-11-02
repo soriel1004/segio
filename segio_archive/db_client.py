@@ -419,7 +419,7 @@ class DBCollector(PreparedDBCollector):
             'db_snapshot_mismatch':'결재 DB 조회 건수와 추출 결과가 일치하지 않습니다. [db_snapshot_mismatch]',
             'approval_user_not_found':'결재 DB에서 해당 직원의 프로필과 관련 문서를 찾지 못했습니다. 서버 연결 도구를 최신 버전으로 업데이트하세요. [approval_user_not_found]',
             'cell_data_missing':'서버의 셀 data 폴더가 없거나 작업기가 접근할 수 없습니다. [cell_data_missing]',
-            'server_disk_full':'서버의 추출 작업용 디스크 공간이 부족합니다. [server_disk_full]',
+            'server_disk_full':'서버 DB 또는 추출 작업 디스크 공간이 부족합니다. 서버 작업 폴더와 PostgreSQL 저장 공간을 확인하세요. [server_disk_full]',
             'server_file_too_large':'서버 파일 시스템 또는 실행 환경의 단일 파일 크기 제한을 초과했습니다. [server_file_too_large]',
             'server_access_denied':'서버 작업기가 원본 파일을 읽거나 작업 폴더에 쓸 권한이 없습니다. 관리자 진단을 실행하세요. [server_access_denied]',
             'server_file_missing':'추출 중 필요한 서버 파일 또는 폴더를 찾지 못했습니다. [server_file_missing]',

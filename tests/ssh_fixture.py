@@ -33,8 +33,10 @@ class Files(SFTPServerInterface):
 
     def lstat(self,path):
         try:
-            attributes=SFTPAttributes.from_stat(os.lstat(self.path(path)))
-            if os.fsdecode(path).startswith('/tmp/.segio-ssh-') and stat.S_ISDIR(attributes.st_mode):
+            value=os.fsdecode(path)
+            actual=(self.path(value) if value.startswith(('/tmp/.segio-ssh-','/backup/.segio-ssh-')) and '/' not in value.rsplit('.segio-ssh-',1)[1] else self.owner.path(os.path.dirname(value))/os.path.basename(value))
+            attributes=SFTPAttributes.from_stat(os.lstat(actual))
+            if os.fsdecode(path).startswith(('/tmp/.segio-ssh-','/backup/.segio-ssh-')) and stat.S_ISDIR(attributes.st_mode):
                 attributes.st_mode=stat.S_IFDIR|0o700
             return attributes
         except OSError as exc:
@@ -73,6 +75,23 @@ class Files(SFTPServerInterface):
         except OSError as exc:
             return paramiko.SFTPServer.convert_errno(exc.errno)
 
+    def list_folder(self,path):
+        try:
+            entries=[]
+            for child in self.path(path).iterdir():
+                item=SFTPAttributes.from_stat(os.lstat(child));item.filename=child.name;entries.append(item)
+            return entries
+        except OSError as exc:return paramiko.SFTPServer.convert_errno(exc.errno)
+
+    def remove(self,path):
+        try:
+            value=os.fsdecode(path);os.unlink(self.owner.path(os.path.dirname(value))/os.path.basename(value));return SFTP_OK
+        except OSError as exc:return paramiko.SFTPServer.convert_errno(exc.errno)
+
+    def rmdir(self,path):
+        try:os.rmdir(self.path(path));return SFTP_OK
+        except OSError as exc:return paramiko.SFTPServer.convert_errno(exc.errno)
+
     def chattr(self,path,attr):
         try:
             paramiko.SFTPServer.set_file_attr(str(self.path(path)),attr)
@@ -109,6 +128,12 @@ class Access(paramiko.ServerInterface):
             import remote_ssh_export as helper
             try:
                 args=shlex.split(command.decode())
+                from segio_archive.ssh_client import WORK_SCRIPT,WORK_PROTOCOL
+                if len(args)==4 and args[1]=='-c' and args[2]==WORK_SCRIPT:
+                    self.owner.workspace_requests.append(args[3])
+                    channel.sendall(json.dumps({'protocol':WORK_PROTOCOL,'ok':True,'base':args[3],'free':100*1024**3}).encode())
+                    channel.send_exit_status(0)
+                    return
                 if len(args)==8 and args[1]=='-c':
                     import subprocess,sys
                     from segio_archive.ssh_client import CHECK_SCRIPT
@@ -151,7 +176,12 @@ class Access(paramiko.ServerInterface):
                 channel.send_exit_status(1)
             finally:
                 channel.close()
-        threading.Thread(target=execute,daemon=True).start()
+        # Real sshd acknowledges exec before an immediate command can exit.
+        # Let Paramiko send CHANNEL_SUCCESS before dispatching this fixture's
+        # in-process workspace probe, otherwise the client sees Channel closed.
+        timer=threading.Timer(.03,execute)
+        timer.daemon=True
+        timer.start()
         return True
 
 
@@ -162,6 +192,7 @@ class SSHServer:
         self.key=key or paramiko.RSAKey.generate(2048)
         self.reads,self.actions,self.transports=[],[],[]
         self.probes=0
+        self.workspace_requests=[]
         self.listener=socket.socket()
         self.listener.bind(('127.0.0.1',0))
         self.port=self.listener.getsockname()[1]
@@ -173,7 +204,9 @@ class SSHServer:
 
     def path(self,path):
         value=os.fsdecode(path)
-        if value.startswith('/tmp/.segio-ssh-'):
+        if value=='/backup' or value.startswith('/backup/.segio-ssh-'):
+            value=str(self.root/'jobs'/value[len('/backup/'):]) if value!='/backup' else str(self.root/'jobs')
+        elif value.startswith('/tmp/.segio-ssh-'):
             value=str(self.root/'jobs'/value[len('/tmp/'):])
         elif value=='/files' or value.startswith('/files/'):
             value=str(self.root/value[len('/files/'):]) if value!='/files' else str(self.root)

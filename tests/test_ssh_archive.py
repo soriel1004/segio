@@ -8,6 +8,11 @@ import shutil
 from pathlib import Path
 import sqlite3
 import tempfile
+import subprocess
+import sys
+import io
+import types
+from contextlib import redirect_stdout
 import threading
 import unittest
 from unittest.mock import patch
@@ -15,7 +20,7 @@ from urllib.parse import quote
 
 from segio_archive.archive import verify_archive
 from segio_archive.compact_mail import build_compact_catalog,mbox_spans,search,mail_record
-from segio_archive.ssh_client import SSHConfig,SSHCollector
+from segio_archive.ssh_client import SSHConfig,SSHCollector,WORK_SCRIPT,WORK_PROTOCOL
 from segio_archive.viewer import Viewer
 from segio_archive.web import Cancelled,CollectionError
 from live_fixtures import synthetic_export
@@ -55,6 +60,7 @@ class SSHArchiveTests(unittest.TestCase):
             self.assertFalse(failed['ready'])
             self.assertFalse(failed['checks']['psql_executable'])
             self.assertEqual(server.probes,3)
+
             self.assertEqual(server.actions,[])
             self.assertEqual(list((root/'jobs').iterdir()),[])
             self.assertIsNone(collector.client)
@@ -71,6 +77,20 @@ class SSHArchiveTests(unittest.TestCase):
                     collector.check_connection('SYNTHETIC_SSH_PASSWORD')
             self.assertEqual(server.probes,3)
             self.assertEqual(server.actions,[])
+
+    @unittest.skipUnless(hasattr(os,'statvfs'),'POSIX workspace probe')
+    def test_workspace_probe_creates_private_parent_and_reports_low_space_without_private_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'backup space'
+            result=json.loads(subprocess.check_output([sys.executable,'-c',WORK_SCRIPT,str(path)]))
+            self.assertEqual(result['protocol'],WORK_PROTOCOL);self.assertTrue(result['ok'])
+            self.assertEqual(result['base'],str(path.resolve()));self.assertEqual(path.stat().st_mode&0o777,0o700)
+            output=io.StringIO()
+            with patch.object(sys,'argv',['probe',str(path)]),patch.object(os,'statvfs',return_value=types.SimpleNamespace(f_bavail=0,f_frsize=4096,f_bsize=4096)),redirect_stdout(output):
+                with self.assertRaises(SystemExit) as caught:exec(compile(WORK_SCRIPT,'workspace','exec'),{})
+            self.assertEqual(caught.exception.code,1)
+            failure=json.loads(output.getvalue());self.assertEqual(failure['error'],'server_disk_full')
+            self.assertNotIn(str(path),output.getvalue())
 
     def test_ssh_db_and_whole_mbox_export_is_searchable_without_web_or_mail_copy_on_server(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -208,6 +228,89 @@ class SSHArchiveTests(unittest.TestCase):
             self.assertNotIn('PRIVATE_WRONG_PASSWORD',str(caught.exception))
             self.assertEqual(server.actions,[])
 
+    def test_large_approval_attachment_is_referenced_not_copied_into_server_job(self):
+        import export_approval_db as exporter
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config,original=self.fixture(root)
+            upload=root/'data/approval/upload';upload.mkdir(parents=True)
+            source=upload/'large.bin';payload=b'SYNTHETIC_APPROVAL_ATTACHMENT'*120000;source.write_bytes(payload)
+            model=json.loads((Path(exporter.HERE)/'approval_db_columns.json').read_text())
+            rows={name:[] for name in model}
+            rows['approval_document']=[{'no':'1','uid':'employee','title':'Direct attachment','context':'<p>direct</p>','wdate':'1700000000'}]
+            rows['approval_member_info']=[{'uid':'employee','rname':'Synthetic'}]
+            rows['approval_attach_info']=[{'no':'1','doc_no':'1','fname':'large.bin','fpath':'large.bin'}]
+            counts={name:len(values) for name,values in rows.items()}
+            collector=SSHCollector(config,confirm_host=lambda *_:True)
+            transfer=collector.transfer
+            def inspect_then_transfer(folder):
+                job=next((root/'jobs').glob('.segio-ssh-*'))
+                self.assertLess(sum(path.stat().st_size for path in job.rglob('*') if path.is_file()),len(payload))
+                self.assertFalse(list(job.rglob('*.zip')))
+                self.assertFalse(list(job.rglob('attachments/*.bin')))
+                transfer(folder)
+            collector.transfer=inspect_then_transfer
+            with patch.object(exporter,'query_database',return_value=(rows,counts)):
+                result=collector.run('SYNTHETIC_SSH_PASSWORD')
+            self.assertEqual(server.workspace_requests,['/backup'])
+            self.assertEqual((result/'documents/1/attachments/1.bin').read_bytes(),payload)
+            self.assertEqual(source.read_bytes(),payload)
+            self.assertEqual((result/'mail/raw/000000.mbox').read_bytes(),original)
+            self.assertTrue(verify_archive(result)['ok'])
+            self.assertEqual(json.loads((result/'manifest.json').read_text())['server_cleanup']['state'],'confirmed')
+            self.assertEqual(list((root/'jobs').iterdir()),[])
+
+    def test_cleanup_failure_keeps_receipt_and_retries_partial_job_on_next_connection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config,original=self.fixture(root)
+            collector=SSHCollector(config,confirm_host=lambda *_:True)
+            execute=collector.execute
+            def command(action,**kwargs):
+                if action=='cleanup':raise CollectionError('Synthetic lost cleanup helper')
+                return execute(action,**kwargs)
+            collector.execute=command
+            def partial(remote,**kwargs):
+                collector.sftp.remove(remote+'/remote_ssh_export.py')
+                raise OSError(13,'Synthetic cleanup denial')
+            collector.remove_job=partial
+            with patch.object(helper,'run_export',side_effect=synthetic_export):
+                first=collector.run('SYNTHETIC_SSH_PASSWORD')
+                old=collector.remote
+                self.assertEqual(json.loads((first/'manifest.json').read_text())['server_cleanup']['state'],'pending')
+                self.assertEqual(len(list((config.output/'.segio-ssh-cache').glob('cleanup-*.json'))),1)
+                if os.name!='nt':(server.path(old)/'source-link').symlink_to(root/'home/e/employee/mbox/inbox.mbox')
+                config.username='other'  # A later backup of another employee still reclaims this completed job.
+                next_collector=SSHCollector(config)
+                initialize=next_collector.initialize
+                def check_old_gone(cache):
+                    self.assertFalse(server.path(old).exists())
+                    initialize(cache)
+                next_collector.initialize=check_old_gone
+                second=next_collector.run('SYNTHETIC_SSH_PASSWORD')
+            self.assertTrue(verify_archive(first)['ok']);self.assertTrue(verify_archive(second)['ok'])
+            self.assertEqual(json.loads((first/'manifest.json').read_text())['server_cleanup']['state'],'confirmed')
+            self.assertEqual(list((config.output/'.segio-ssh-cache').glob('cleanup-*.json')),[])
+            self.assertEqual(list((root/'jobs').iterdir()),[])
+            self.assertEqual((root/'home/e/employee/mbox/inbox.mbox').read_bytes(),original)
+
+    def test_failed_legacy_tmp_job_restarts_in_backup_and_only_failed_job_is_retired(self):
+        from export_schema_from_segio_config import SafeError
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config,original=self.fixture(root)
+            config.work_base='/tmp'
+            with patch.object(helper,'run_export',side_effect=SafeError('space','server_disk_full')):
+                with self.assertRaisesRegex(CollectionError,'server_disk_full'):
+                    SSHCollector(config,confirm_host=lambda *_:True).run('SYNTHETIC_SSH_PASSWORD')
+            old=next((root/'jobs').glob('.segio-ssh-*'))
+            unrelated=root/'jobs'/('.segio-ssh-'+'f'*32);unrelated.mkdir(mode=0o700)
+            (unrelated/'keep.txt').write_text('OTHER_JOB_MUST_SURVIVE')
+            config.work_base='/backup'
+            with patch.object(helper,'run_export',side_effect=synthetic_export):
+                result=SSHCollector(config).run('SYNTHETIC_SSH_PASSWORD')
+            self.assertFalse(old.exists());self.assertTrue((unrelated/'keep.txt').exists())
+            self.assertTrue(verify_archive(result)['ok'])
+            self.assertEqual(server.workspace_requests,['/tmp','/backup'])
+            self.assertEqual((root/'home/e/employee/mbox/inbox.mbox').read_bytes(),original)
+
     def test_changed_host_key_is_rejected_before_credentials_or_new_job(self):
         import paramiko
         with tempfile.TemporaryDirectory() as tmp:
@@ -317,12 +420,12 @@ class CompactMailTests(unittest.TestCase):
                 stream.seek(spans[1][0])
                 self.assertTrue(stream.read(30).startswith(b'Subject: Second'))
 
-    def test_sqlite_mail_offsets_above_four_gib_are_not_truncated(self):
+    def test_sqlite_mail_offsets_above_fifty_gib_are_not_truncated(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve()
             (root/'mail/raw').mkdir(parents=True)
             source=root/'mail/raw/000000.mbox'
-            offset=2**32+4096
+            offset=50*1024**3+4096
             payload=b'Subject: Sparse offset\n\nbody\n'
             with source.open('wb') as stream:
                 if os.name=='nt':
@@ -356,6 +459,7 @@ class CompactMailTests(unittest.TestCase):
                 with collector.sftp.open('/files/mail/raw/000000.mbox','rb') as stream:
                     stream.seek(offset)
                     self.assertEqual(stream.read(len(payload)),payload)
+                    self.assertEqual(list(stream.readv([(offset,len(payload))],max_concurrent_prefetch_requests=8)),[payload])
             finally:
                 if collector.sftp:
                     collector.sftp.close()

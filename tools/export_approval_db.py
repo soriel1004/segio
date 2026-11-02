@@ -423,10 +423,11 @@ class FrozenHTML(HTMLParser):
 
 
 class Bundle:
-    def __init__(self, folder, cell, username):
+    def __init__(self, folder, cell, username, reference_file=None):
         self.folder, self.cell, self.username = folder, os.path.realpath(cell), username
         self.files, self.issues, self.image_cache, self.attachments_by_no = {}, [], {}, {}
         self.profiles = {}
+        self.reference_file = reference_file
         self.display_decoding = {"urlencoded_html": 0, "escaped_html": 0, "base64_signature": 0}
 
     def issue(self, kind, value):
@@ -559,6 +560,11 @@ class Bundle:
         if not re.match(r"^\.[A-Za-z0-9]{1,10}$", extension):
             extension = ".bin"
         relative = "documents/%s/attachments/%s%s" % (document, row["no"], extension)
+        if self.reference_file is not None:
+            # SSH records a verified source reference; no server-side copy.
+            details = self.reference_file(path, relative)
+            self.files[relative] = details
+            return {"name": row["fname"], "path": relative, "bytes": details["bytes"]}
         target = os.path.join(self.folder, relative)
         parent = os.path.dirname(target)
         if not os.path.isdir(parent):
@@ -716,7 +722,9 @@ def reserve_archive_path(output, username):
         return path
 
 
-def run_export(config, username, output, cell=None, binary="/usr/bin/psql", progress=None, live_scope=False, pack=True, checkpoint=None, approval_since=None):
+def run_export(config, username, output, cell=None, binary="/usr/bin/psql", progress=None, live_scope=False, pack=True, checkpoint=None, approval_since=None, reference_file=None):
+    if reference_file is not None and pack:
+        raise SafeError("Direct source references require an unpacked SSH export.")
     notify = progress or (lambda message: None)
     approval_since = approval_cutoff(approval_since)
     if not re.match(r"^[A-Za-z0-9_.@-]{1,100}$", username):
@@ -736,7 +744,7 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
         notify("Snapshot checked: %d active documents, %d historical versions." %
                (counts["approval_document"], counts["approval_document_backup"]))
         shutil.rmtree(work)
-        bundle = Bundle(folder, cell, username)
+        bundle = Bundle(folder, cell, username, reference_file)
         notify("Copying attachments and building offline HTML...")
         # The live bridge already authenticated the employee. An employee with
         # no approval profile/documents must still be able to archive mail.

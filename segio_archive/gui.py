@@ -35,6 +35,7 @@ class App(tk.Tk):
         self.ssh_user = tk.StringVar(value='root')
         self.ssh_password = tk.StringVar()
         self.ssh_key = tk.StringVar()
+        self.ssh_work = tk.StringVar(value='/backup')
         self.resume = tk.BooleanVar(value=True)
         self.make_zip = tk.BooleanVar(value=False)
         self.folder = tk.StringVar(value=str(Path.home() / "Documents" / "SEGIO보관함"))
@@ -63,7 +64,8 @@ class App(tk.Tk):
         for i,(label,variable,show) in enumerate([
             ('SSH 서버 주소',self.ssh_host,''),('SSH 포트',self.ssh_port,''),
             ('서버 SSH 계정',self.ssh_user,''),('SSH 암호 / 키 암호',self.ssh_password,'•'),
-            ('백업할 SEGIO ID',self.user,''),('개인키 파일 (선택)',self.ssh_key,'')]):
+            ('백업할 SEGIO ID',self.user,''),('개인키 파일 (선택)',self.ssh_key,''),
+            ('서버 작업 폴더',self.ssh_work,'')]):
             ttk.Label(self.ssh_form,text=label,width=20).grid(row=i,column=0,sticky='w',pady=3)
             ttk.Entry(self.ssh_form,textvariable=variable,show=show).grid(row=i,column=1,sticky='ew',pady=3)
             if variable is self.ssh_key:
@@ -159,7 +161,7 @@ class App(tk.Tk):
         from .ssh_client import SSHConfig
         return SSHConfig(host=self.ssh_host.get().strip(),port=int(self.ssh_port.get()),
             ssh_user=self.ssh_user.get().strip(),username=self.user.get().strip(),output=Path(self.folder.get()),
-            key_file=self.ssh_key.get().strip(),approvals=self.approvals.get(),mail=self.mail.get(),
+            key_file=self.ssh_key.get().strip(),work_base=self.ssh_work.get().strip(),approvals=self.approvals.get(),mail=self.mail.get(),
             make_zip=self.make_zip.get(),resume=self.resume.get(),cancel=self.cancel_event)
 
     def check_connection(self):

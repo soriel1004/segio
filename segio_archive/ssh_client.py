@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import os
+import posixpath
 from pathlib import Path
 import re
 import secrets
@@ -27,6 +28,21 @@ from .progress import Reporter, LABELS
 
 PROTOCOL = 'segio-ssh-archive/1'
 CHECK_PROTOCOL = 'segio-ssh-check/1'
+WORK_PROTOCOL = 'segio-ssh-workspace/1'
+WORK_SCRIPT = '''import errno,json,os,sys
+try:
+ base=os.path.realpath(sys.argv[1])
+ if not os.path.isdir(base): os.makedirs(base,448)
+ info=os.statvfs(base)
+ free=info.f_bavail*(info.f_frsize or info.f_bsize)
+ if not os.access(base,os.W_OK|os.X_OK): raise OSError(errno.EACCES,'workspace')
+ if free<8*1024*1024: raise OSError(errno.ENOSPC,'workspace')
+ print(json.dumps({'protocol':'segio-ssh-workspace/1','ok':True,'base':base,'free':free}))
+except (IOError,OSError) as error:
+ code='server_disk_full' if error.errno==errno.ENOSPC else 'server_access_denied'
+ print(json.dumps({'protocol':'segio-ssh-workspace/1','ok':False,'error':code}))
+ sys.exit(1)
+'''
 CHECK_SCRIPT = '''import json,os,sys
 config,cell,psql,mail,work=sys.argv[1:]
 try:
@@ -62,6 +78,7 @@ class SSHConfig:
     mail_template: str = '/home/segio/cell000/home/{initial}/{user}/mbox'
     python: str = '/usr/bin/python'
     psql: str = '/usr/bin/psql'
+    work_base: str = '/backup'
     approvals: bool = True
     mail: bool = True
     make_zip: bool = False
@@ -80,7 +97,7 @@ class SSHConfig:
             raise CollectionError('백업할 직원의 정확한 SEGIO ID를 입력하세요.')
         if for_backup and not self.approvals and not self.mail:
             raise CollectionError('결재 문서 또는 메일을 선택하세요.')
-        for path in (self.db_config,self.cell,self.mail_template,self.python,self.psql):
+        for path in (self.db_config,self.cell,self.mail_template,self.python,self.psql,self.work_base):
             if not path.startswith('/') or re.search(r'[\x00-\x1f]',path):
                 raise CollectionError('서버 경로는 절대 경로로 입력하세요.')
         if self.key_file and not Path(self.key_file).expanduser().is_file():
@@ -106,6 +123,7 @@ class SSHCollector:
         self.config, self.log, self.confirm_host = config, log, confirm_host
         self.client = self.sftp = None
         self.phase, self.remote = 'SSH 연결', None
+        self.retired=[]
         self.report=Reporter(progress)
 
     def begin_stage(self,stage,detail=''):
@@ -206,7 +224,7 @@ class SSHCollector:
                     raise CollectionError('메일 경로 형식을 확인하세요.') from None
             self.begin_stage('environment')
             result=self.command([self.config.python,'-c',CHECK_SCRIPT,self.config.db_config,
-                self.config.cell,self.config.psql,mail,'/tmp'],protocol=CHECK_PROTOCOL,timeout=30)
+                self.config.cell,self.config.psql,mail,self.config.work_base],protocol=CHECK_PROTOCOL,timeout=30)
             self.checkpoint()
             checks=result.get('checks')
             keys=('python_compatible','runtime_modules','database_config_readable','cell_readable',
@@ -237,7 +255,7 @@ class SSHCollector:
         if state_path.exists():
             state = json.loads(state_path.read_text(encoding='utf-8'))
             self.remote = state['remote']
-            if not re.fullmatch(r'/tmp/\.segio-ssh-[0-9a-f]{32}',self.remote):
+            if not self.valid_remote(self.remote):
                 raise CollectionError('SSH 이어받기 정보가 올바르지 않습니다.')
             try:
                 info = self.sftp.lstat(self.remote)
@@ -245,9 +263,23 @@ class SSHCollector:
                 raise CollectionError('서버 임시 작업이 없어 이어받을 수 없습니다. ‘이전 전송 이어받기’를 해제해 새로 시작하세요. [SSH_SNAPSHOT_MISSING]') from None
             if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
                 raise CollectionError('SSH 임시 작업 폴더가 안전하지 않습니다.')
-            self.log('이전 SSH 작업에 연결해 전송을 이어갑니다.')
-            return
-        self.remote = '/tmp/.segio-ssh-'+secrets.token_hex(16)
+            self.retired=state.get('retired',[])
+            if not isinstance(self.retired,list) or any(not self.valid_remote(path) for path in self.retired):
+                raise CollectionError('SSH 이전 작업 경로를 확인하세요.')
+            status=self.read_json(self.remote+'/status.json',65536)
+            if status.get('protocol')!=PROTOCOL:
+                raise CollectionError('SSH 이전 작업 상태를 확인하세요.')
+            if status.get('state')!='failed':
+                self.log('이전 SSH 작업에 연결해 전송을 이어갑니다. 작업 경로: '+self.remote)
+                return
+            self.retired.append(self.remote)
+            self.log('이전 서버 추출이 실패해 새 작업 공간에서 다시 추출합니다.')
+        workspace=self.command([self.config.python,'-c',WORK_SCRIPT,self.config.work_base],protocol=WORK_PROTOCOL,timeout=30)
+        base=workspace.get('base')
+        if not isinstance(base,str) or not base.startswith('/') or posixpath.normpath(base)!=base or '\0' in base:
+            raise CollectionError('서버 작업 폴더 응답이 올바르지 않습니다.')
+        self.remote = base.rstrip('/')+'/.segio-ssh-'+secrets.token_hex(16)
+        self.log('서버 작업 경로: '+self.remote+' · 메일·첨부 원본은 직접 전송합니다.')
         self.sftp.mkdir(self.remote,mode=0o700)
         self.sftp.chmod(self.remote,0o700)
         tools = self.config.tools_dir or (Path(sys.executable).parent/'tools' if getattr(sys,'frozen',False) else Path(__file__).resolve().parents[1]/'tools')
@@ -262,9 +294,101 @@ class SSHCollector:
             with self.sftp.open(self.remote+'/'+name,'wx') as stream:
                 stream.write(json.dumps(data).encode())
             self.sftp.chmod(self.remote+'/'+name,0o600)
-        atomic_write(state_path,json.dumps({'remote':self.remote,'protocol':PROTOCOL}).encode())
+        atomic_write(state_path,json.dumps({'remote':self.remote,'protocol':PROTOCOL,'retired':self.retired}).encode())
         os.chmod(state_path,0o600)
         self.execute('prepare',detach=True)
+
+    @staticmethod
+    def valid_remote(path):
+        return (isinstance(path,str) and path.startswith('/') and posixpath.normpath(path)==path and
+                '\0' not in path and re.fullmatch(r'\.segio-ssh-[0-9a-f]{32}',posixpath.basename(path)) is not None)
+
+    def remove_job(self,remote,failed=False,previously_validated=False):
+        """Only a private job owned by this capture; never follow child symlinks."""
+        if not self.valid_remote(remote):
+            raise CollectionError('서버 정리 대상 경로를 확인하세요.')
+        try:
+            info=self.sftp.lstat(remote)
+        except OSError as error:
+            if error.errno==2:return
+            raise
+        if not stat.S_ISDIR(info.st_mode) or info.st_mode&0o077:
+            raise CollectionError('서버 임시 작업 폴더의 권한을 확인하세요.')
+        if not previously_validated:
+            request=self.read_json(remote+'/request.json',65536)
+            if request.get('protocol')!=PROTOCOL or request.get('user')!=self.config.username:
+                raise CollectionError('서버 정리 대상 직원이 일치하지 않습니다.')
+            marker=self.read_json(remote+('/status.json' if failed else '/verified.json'),65536)
+            if marker.get('protocol')!=PROTOCOL or (marker.get('state')!='failed' if failed else marker.get('ok') is not True):
+                raise CollectionError('서버 작업 검증 상태를 확인하세요.')
+        def delete_tree(path):
+            self.checkpoint()
+            for entry in self.sftp.listdir_attr(path):
+                if entry.filename in ('.','..') or '/' in entry.filename or '\\' in entry.filename:
+                    raise CollectionError('서버 임시 파일 경로를 확인하세요.')
+                child=path+'/'+entry.filename
+                mode=self.sftp.lstat(child).st_mode
+                if stat.S_ISDIR(mode):delete_tree(child)
+                else:self.sftp.remove(child)
+            self.sftp.rmdir(path)
+        delete_tree(remote)
+        try:self.sftp.lstat(remote)
+        except OSError as error:
+            if error.errno==2:return
+            raise
+        raise CollectionError('서버 임시 작업 삭제를 확인하지 못했습니다.')
+
+    def cleanup_identity(self):
+        return dict(host=self.config.host,port=self.config.port,ssh_user=self.config.ssh_user,user=self.config.username)
+
+    def finish_cleanup(self,record,path):
+        # The receipt is written only after the Windows folder has been published.
+        expected_user=record['identity']['user']
+        if not isinstance(expected_user,str) or not re.fullmatch(r'[A-Za-z0-9_.@-]{1,100}',expected_user):
+            raise CollectionError('서버 정리 기록의 직원을 확인하세요.')
+        folder=Path(record['backup'])
+        manifest=json.loads((folder/'manifest.json').read_text(encoding='utf-8'))
+        if (manifest.get('user')!=expected_user or manifest.get('ssh_export',{}).get('job')!=record['job']):
+            raise CollectionError('완료된 Windows 백업의 서버 정리 기록을 확인하세요.')
+        for remote in record['paths']:
+            if remote not in record['validated']:
+                # Validate before deletion and persist that proof for partial retries.
+                failed=posixpath.basename(remote)!=record['job']
+                if not self.valid_remote(remote):raise CollectionError('서버 작업 경로를 확인하세요.')
+                try:info=self.sftp.lstat(remote)
+                except OSError as error:
+                    if error.errno==2:
+                        record['validated'].append(remote)
+                        continue
+                    raise
+                if not stat.S_ISDIR(info.st_mode) or info.st_mode&0o077:raise CollectionError('서버 작업 권한을 확인하세요.')
+                request=self.read_json(remote+'/request.json',65536)
+                marker=self.read_json(remote+('/status.json' if failed else '/verified.json'),65536)
+                if request.get('protocol')!=PROTOCOL or request.get('user')!=expected_user or marker.get('protocol')!=PROTOCOL or (marker.get('state')!='failed' if failed else marker.get('ok') is not True):
+                    raise CollectionError('서버 정리 검증 상태가 일치하지 않습니다.')
+                record['validated'].append(remote)
+                atomic_write(path,json.dumps(record).encode('utf-8'));os.chmod(path,0o600)
+            if remote==self.remote:
+                try:self.execute('cleanup')
+                except Exception:pass
+            self.remove_job(remote,previously_validated=True)
+        manifest['server_cleanup']={'state':'confirmed','job':record['job']}
+        atomic_write(folder/'manifest.json',json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
+        path.unlink()
+
+    def retry_cleanup(self,output):
+        pending=output/'.segio-ssh-cache'
+        if pending.is_symlink():raise CollectionError('서버 정리 기록 폴더를 확인하세요.')
+        for path in pending.glob('cleanup-*.json'):
+            if path.is_symlink():continue
+            try:
+                record=json.loads(path.read_text(encoding='utf-8'))
+                identity=self.cleanup_identity()
+                if any(record.get('identity',{}).get(key)!=identity[key] for key in ('host','port','ssh_user')):continue
+                self.finish_cleanup(record,path)
+                self.log('이전 백업의 서버 임시 작업을 정리하고 삭제를 확인했습니다.')
+            except Exception:
+                self.log('이전 백업의 서버 정리가 대기 중입니다. 완료된 Windows 백업은 유지합니다.')
 
     def wait_ready(self):
         previous, deadline, reported = None, time.monotonic()+72*3600, 0.0
@@ -391,6 +515,7 @@ class SSHCollector:
             password=''
             output=self.config.output.expanduser().resolve()
             output.mkdir(parents=True,exist_ok=True)
+            self.retry_cleanup(output)
             identity={key:getattr(self.config,key) for key in ('host','port','ssh_user','username','db_config','cell','mail_template','approvals','mail')}
             token=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()[:24]
             cache=output/'.segio-ssh-cache'/token
@@ -437,12 +562,22 @@ class SSHCollector:
             self.begin_stage('publish')
             result=publish_local(contents,archive,output,self.config.username)
             self.begin_stage('cleanup')
+            record={'identity':self.cleanup_identity(),'backup':str(result),
+                    'job':posixpath.basename(self.remote),'paths':list(dict.fromkeys([self.remote]+self.retired)),
+                    'validated':[]}
+            pending=cache.parent/('cleanup-'+posixpath.basename(self.remote)+'.json')
+            atomic_write(pending,json.dumps(record).encode('utf-8'));os.chmod(pending,0o600)
             try:
-                self.execute('cleanup')
+                self.finish_cleanup(record,pending)
+                self.log('서버 임시 작업 폴더 삭제 확인 완료 · 원본 DB·메일·첨부는 보존했습니다.')
             except Exception:
-                self.log('보관은 완료됐습니다. 서버의 SSH 임시 작업 정리를 확인하지 못했습니다.')
+                manifest=json.loads((result/'manifest.json').read_text(encoding='utf-8'))
+                manifest['server_cleanup']={'state':'pending','job':record['job']}
+                atomic_write(result/'manifest.json',json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
+                self.log('Windows 백업은 완료됐지만 서버 정리는 대기 중입니다. 다음 SSH 백업 접속 시 자동 재시도합니다.')
             shutil.rmtree(cache)
-            self.report('cleanup',1,1,'steps','백업 저장 완료',force=True)
+            detail='서버 임시 파일 정리 대기 · Windows 백업 저장 완료' if pending.exists() else '서버 임시 파일 삭제 확인 · 백업 저장 완료'
+            self.report('cleanup',1,1,'steps',detail,force=True)
             self.log('SSH 백업과 SHA-256 검증 완료: '+str(result))
             return result
         except (CollectionError,Cancelled):

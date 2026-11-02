@@ -41,6 +41,7 @@ def main():
     ssh.add_argument('--db-config',default='/home/segio/cell000/etc/db.conf')
     ssh.add_argument('--cell',default='/home/segio/cell000')
     ssh.add_argument('--mail-template',default='/home/segio/cell000/home/{initial}/{user}/mbox')
+    ssh.add_argument('--work-base',default='/backup',help='서버 임시 작업 상위 폴더')
     ssh.add_argument('--zip',action='store_true')
     ssh.add_argument('--fresh',action='store_true',help='이전 임시 전송 대신 새 추출 시작')
     ssh.add_argument('--no-mail',action='store_true')
@@ -70,7 +71,7 @@ def main():
         try:
             config=SSHConfig(host=args.host,port=args.port,ssh_user=args.ssh_user,username=args.user,
                 output=args.output,key_file=args.key_file,db_config=args.db_config,cell=args.cell,
-                mail_template=args.mail_template,approvals=not args.no_approvals,mail=not args.no_mail,
+                mail_template=args.mail_template,work_base=args.work_base,approvals=not args.no_approvals,mail=not args.no_mail,
                 resume=not args.fresh,make_zip=args.zip)
             config.validate()
             password=getpass.getpass('서버 SSH 암호 / 개인키 암호 (저장하지 않음): ')
