@@ -18,6 +18,7 @@ Copy-Item docs dist\SEGIOArchive\docs -Recurse
 New-Item -ItemType Directory -Force -Path dist\SEGIOArchive\tools | Out-Null
 Get-ChildItem tools -File | Copy-Item -Destination dist\SEGIOArchive\tools
 # GitHub Actions creates the only downloadable ZIP from this folder.
+if (Test-Path "dist\SEGIOArchive\SEGIOArchive-Windows.zip") { throw "Nested distribution ZIP must not be included." }
 foreach ($required in @("SEGIOArchive.exe", "_internal", "tools\remote_ssh_export.py", "_internal\segio_archive\browser_assets\delete.js")) {
     if (-not (Test-Path (Join-Path "dist\SEGIOArchive" $required))) { throw "Missing package entry: $required" }
 }

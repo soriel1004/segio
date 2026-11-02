@@ -11,10 +11,22 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+
+class TrackingResult(unittest.TextTestResult):
+    def startTest(self, test):
+        super().startTest(test)
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            try:
+                Path(summary).write_text("## Test in progress\n\n`" + test.id() + "`\n", encoding="utf-8")
+            except OSError:
+                pass  # Progress reporting must not change the test outcome.
+
+
 def main():
     sys.path.insert(0, str(ROOT))
     suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"))
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    result = unittest.TextTestRunner(verbosity=2, resultclass=TrackingResult).run(suite)
     failures = result.failures + result.errors
     if os.environ.get("GITHUB_ACTIONS") == "true":
         for test, traceback in failures:
@@ -32,7 +44,7 @@ def main():
         for test, traceback in failures:
             lines.extend([f"### {test.id()}", "", "```text",
                           traceback[-12000:].replace("```", "` ` `"), "```", ""])
-        with open(summary, "a", encoding="utf-8") as stream:
+        with open(summary, "w", encoding="utf-8") as stream:
             stream.write("\n".join(lines) + "\n")
     return 0 if result.wasSuccessful() else 1
 
