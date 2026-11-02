@@ -74,5 +74,6 @@ jobs:
       - uses: actions/upload-artifact@v5
         with:
           name: SEGIOArchive-Windows
-          path: dist/SEGIOArchive-Windows.zip
+          path: dist/SEGIOArchive/
+          include-hidden-files: true
           if-no-files-found: error

@@ -17,5 +17,8 @@ Copy-Item README.md dist\SEGIOArchive\README.md
 Copy-Item docs dist\SEGIOArchive\docs -Recurse
 New-Item -ItemType Directory -Force -Path dist\SEGIOArchive\tools | Out-Null
 Get-ChildItem tools -File | Copy-Item -Destination dist\SEGIOArchive\tools
-Compress-Archive -Path dist\SEGIOArchive -DestinationPath dist\SEGIOArchive-Windows.zip -Force
-Write-Host "Built dist\SEGIOArchive-Windows.zip. Keep the complete folder beside SEGIOArchive.exe."
+# GitHub Actions creates the only downloadable ZIP from this folder.
+foreach ($required in @("SEGIOArchive.exe", "_internal", "tools\remote_ssh_export.py", "_internal\segio_archive\browser_assets\delete.js")) {
+    if (-not (Test-Path (Join-Path "dist\SEGIOArchive" $required))) { throw "Missing package entry: $required" }
+}
+Write-Host "Built dist\SEGIOArchive. GitHub download requires one extraction; keep all files beside SEGIOArchive.exe."
