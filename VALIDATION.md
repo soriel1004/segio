@@ -11,6 +11,8 @@ Windows는 전체 원본 재전송 대신 범위 SFTP/readv를 사용하고 원�
 
 초기 로컬 전체 169개는 실패·오류 없이 종료했고 GUI·관리형 Chromium 제한 12개를 건너뛰었습니다. 실제 Python 2.6.9의 범위 전송 원본/해시 검사 5개와 기존 SSH 18개, 추가 기능 9개도 통과했습니다. 지연 도착 메일의 Received 날짜 포함과 구분 개행 정규화를 추가한 최종 전체 재실행도 169개 중 실패·오류 0개, 환경 제한 12개 건너뜀으로 종료했습니다. 경로 표기의 Windows 정규화 비교를 보완한 관련 9개 최종 재실행도 통과했습니다. 환경 재연결로 로컬 소켓 권한이 초기화된 한 번의 실행은 PermissionError로 실패했고, 허용 후 다시 검증했습니다. 원본은 합성 자료이며 실제 운영 계정/메일/50GB 전체 백업을 실행한 결과는 아닙니다.
 
+[Actions #65](https://github.com/soriel1004/segio/actions/runs/41553555688)에서 Linux와 Windows SSH 통합/병합/복구 검사는 통과했지만 직접 helper 단위 검사 2개가 Windows 역슬래시 임시 경로를 서버 템플릿으로 전달해 mail_path_unconfigured로 실패했습니다. 해당 시험 입력을 as_posix로 바꾸어 실제 CentOS 템플릿 형식을 양쪽 OS에서 동일하게 검증합니다. 관련 9개를 로컬에서 재실행해 모두 통과했습니다.
+
 ## v0.4.17 잘못 중첩된 이미지 HTML 처리
 
 운영 진단은 메일 순번 713, ValueError, safe_html:187입니다. 합성 HTML `<img><img src=cid:x /><img / >`로 같은 unwrap 위치와 같은 ValueError를 재현했습니다. BeautifulSoup가 두 번째 이미지 아래에 마지막 이미지를 중첩하고, 앞 이미지를 decompose한 뒤 목록에 남은 자식을 unwrap하면서 트리에서 분리된 요소라는 예외가 발생했습니다. 이미 제거되거나 분리된 태그는 건너뛰고 표시할 수 없는 이미지는 wrapper만 제거해 주변 텍스트를 보존합니다. 제거된 head/style 등의 중복 처리도 방지하며 긴 숫자·유니코드 숫자 표 속성으로 인한 추가 ValueError를 막았습니다.

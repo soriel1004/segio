@@ -41,7 +41,7 @@ class BackupUpdateTests(unittest.TestCase):
                             self.message('Recent',formatdate(usegmt=True))+self.message('Unknown','invalid')+
                             self.message('Delayed','Mon, 01 Jan 2024 00:00:00 +0000').replace(b'Content-Type:',b'Received: by example.test; '+formatdate(usegmt=True).encode()+b'\nContent-Type:'))
             cutoff_value=int(time.time())-15*86400
-            sources,transfers,identities=helper.mail_delta({'user':'employee','mail_template':str(root/'{user}')},lambda *a,**k:None,cutoff_value)
+            sources,transfers,identities=helper.mail_delta({'user':'employee','mail_template':(root/'{user}').as_posix()},lambda *a,**k:None,cutoff_value)
             self.assertEqual(len(sources),3);self.assertEqual(len(identities),1)
             original=raw.read_bytes()
             for item in transfers:
@@ -174,7 +174,7 @@ class BackupUpdateTests(unittest.TestCase):
                     with raw.open('ab') as stream:stream.write(self.message('Two',formatdate(usegmt=True)))
                 return original(*args)
             with patch.object(helper,'recent_message',side_effect=changing):
-                sources,_,_=helper.mail_delta({'user':'employee','mail_template':str(root/'{user}')},lambda state,**fields:events.append(fields),int(time.time())-86400)
+                sources,_,_=helper.mail_delta({'user':'employee','mail_template':(root/'{user}').as_posix()},lambda state,**fields:events.append(fields),int(time.time())-86400)
             self.assertEqual(len(sources),2)
             self.assertEqual(events[-1]['attempt'],2)
 
