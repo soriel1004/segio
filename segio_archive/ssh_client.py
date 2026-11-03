@@ -620,7 +620,10 @@ class SSHCollector:
                 else:
                     build_compact_catalog(contents,self.config.username,self.checkpoint,self.log,progress=self.forward_progress)
                 local_manifest=load(contents/'manifest.json');local_manifest['backup_origin']=origin
-                local_manifest['last_backup_completed_at']=utc_now();save(contents/'manifest.json',local_manifest)
+                local_manifest['last_backup_completed_at']=utc_now()
+                for kind in ('approvals','mail'):
+                    if getattr(self.config,kind):local_manifest.setdefault('backup_completed_by_kind',{})[kind]=local_manifest['last_backup_completed_at']
+                save(contents/'manifest.json',local_manifest)
             archive=cache/'archive.zip' if plan.get('published') and self.config.make_zip and (cache/'archive.zip').is_file() else None
             if self.config.make_zip and not plan.get('published'):
                 self.begin_stage('zip')

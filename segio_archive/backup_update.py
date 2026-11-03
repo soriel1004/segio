@@ -72,13 +72,13 @@ def workspace(output,user,identity,resume=True):
     output.mkdir(parents=True,exist_ok=True)
     control=output/'.segio-ssh-cache'
     if control.is_symlink():raise CollectionError('백업 작업 폴더의 링크를 사용할 수 없습니다.')
-    control.mkdir(exist_ok=True);hide_control(control)
+    control.mkdir(mode=0o700,exist_ok=True);hide_control(control)
     token=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()[:24]
     cache=control/safe_name(user,100)
     legacy=control/token
     if not cache.exists() and legacy.exists():legacy.rename(cache)
     if cache.is_symlink():raise CollectionError('백업 작업 폴더의 링크를 사용할 수 없습니다.')
-    cache.mkdir(exist_ok=True)
+    cache.mkdir(mode=0o700,exist_ok=True)
     target=named_folder(output,user)
     journal=cache/'publish.json'
     if journal.exists():
@@ -125,7 +125,7 @@ def workspace(output,user,identity,resume=True):
     data=cache/'incoming' if base else target
     if base and target!=base and target.exists() and not complete(target) and not data.exists():target.rename(data)
     if data.is_symlink():raise CollectionError('백업 데이터 폴더의 링크를 사용할 수 없습니다.')
-    data.mkdir(parents=True,exist_ok=True)
+    data.mkdir(mode=0o700,parents=True,exist_ok=True)
     return output,cache,data,base,plan
 
 
@@ -181,7 +181,7 @@ def merge(base,incoming,stage,checkpoint=lambda:None,log=lambda _:None,progress=
     if digest_file(base/'catalog.sqlite3',checkpoint)!=old['files']['catalog.sqlite3']:
         raise CollectionError('기존 검색 DB가 변경되었습니다. [BACKUP_SOURCE_CHANGED]')
     if stage.exists():shutil.rmtree(stage)
-    stage.mkdir()
+    stage.mkdir(mode=0o700)
     # Only declared files are carried forward; atomic writers never modify a
     # hard-linked original. This does not duplicate 50GB MBOX/attachment bytes.
     for name in list(old['files'])+['manifest.json']:
@@ -268,6 +268,31 @@ def merge(base,incoming,stage,checkpoint=lambda:None,log=lambda _:None,progress=
     result.pop('portable_mail',None);result.pop('browser_index',None)
     result['incremental']={'since':new['ssh_export'].get('since'),'overlap_days':15,'added_mail':added,
                            'updated_approval':len(fresh['items']),'previous_completed_at':old.get('last_backup_completed_at',old.get('finished_at'))}
+    # Keep both old and new missing-file diagnostics; an incremental export's
+    # report must not disappear when its temporary transfer folder is removed.
+    diagnostics=[];seen_issues=set()
+    for folder,metadata in ((base,old),(incoming,new)):
+        if 'issues.json' not in metadata['files']:continue
+        values=load(folder/'issues.json')
+        if not isinstance(values,list):raise CollectionError('결재 확인 보고서의 형식을 확인하세요.')
+        for value in values:
+            key=json.dumps(value,sort_keys=True,ensure_ascii=True)
+            if key not in seen_issues:diagnostics.append(value);seen_issues.add(key)
+    if 'issues.json' in old['files'] or 'issues.json' in new['files']:
+        save(stage/'issues.json',diagnostics);files['issues.json']=digest_file(stage/'issues.json')
+    summary=('SEGIO_SSH_MERGED_V1\nApproval documents: %d\nMail messages: %d\n'
+             'Updated approval documents: %d\nAdded mail messages: %d\n'
+             'Approval diagnostic entries (including earlier captures): %d\n'
+             'Account deletion verified: false\nEND_SEGIO_SSH_MERGED_V1\n' %
+             (result['counts']['approval'],result['counts']['mail'],len(fresh['items']),added,len(diagnostics)))
+    atomic_write(stage/'export-summary.txt',summary.encode('ascii'));files['export-summary.txt']=digest_file(stage/'export-summary.txt')
+    result['incremental']['snapshot_rows']=new.get('snapshot_rows',{})
+    for entry in result.get('coverage',[]):
+        if entry.get('kind')=='approval':entry['saved']=result['counts']['approval']
+        elif entry.get('kind')=='mail_index':entry['saved']=result['counts']['mail']
+        elif entry.get('kind')=='mail':entry['files']=len(old_sources['sources'])
+    result.setdefault('coverage',[]).append(dict(kind='incremental',since=new['ssh_export'].get('since'),
+                                               updated_approval=len(fresh['items']),added_mail=added))
     save(stage/'manifest.json',result)
     log(f'추가 백업 병합: 새 메일 {added:,}건 · 결재 {len(fresh["items"]):,}건 · 기존 메일 ID/페이지 유지')
     result=build_portable_mail(stage,result,checkpoint,log,progress)

@@ -13,6 +13,8 @@ Windows는 전체 원본 재전송 대신 범위 SFTP/readv를 사용하고 원�
 
 [Actions #65](https://github.com/soriel1004/segio/actions/runs/41553555688)에서 Linux와 Windows SSH 통합/병합/복구 검사는 통과했지만 직접 helper 단위 검사 2개가 Windows 역슬래시 임시 경로를 서버 템플릿으로 전달해 mail_path_unconfigured로 실패했습니다. 해당 시험 입력을 as_posix로 바꾸어 실제 CentOS 템플릿 형식을 양쪽 OS에서 동일하게 검증합니다. 관련 9개를 로컬에서 재실행해 모두 통과했습니다.
 
+[Actions #66](https://github.com/soriel1004/segio/actions/runs/41554246856)에서도 실제 Windows SSH 통합/병합/복구는 통과했고, 같은 직접 helper 검사 2개가 Windows 임시 폴더의 짧은 별칭 때문에 realpath 검사에서 실패했습니다. 시험 루트를 resolve한 다음 POSIX 템플릿으로 전달해 실제 서버처럼 검증합니다. 추가 병합에서 이전/새 누락 파일 진단을 모두 보존하고 요약·수집 범위 건수를 갱신하도록 보완했습니다. 파일의 정확한 SHA-256과 별도로, 메시지 비교용 해시만 마지막 구분 개행을 정규화합니다. 보완 후 전체 170개는 실패·오류 0개, 환경 제한 12개 건너뜀으로 종료했으며 관련 10개도 통과했습니다. Windows 실행 검증은 후속 Actions 결과로 확정합니다.
+
 ## v0.4.17 잘못 중첩된 이미지 HTML 처리
 
 운영 진단은 메일 순번 713, ValueError, safe_html:187입니다. 합성 HTML `<img><img src=cid:x /><img / >`로 같은 unwrap 위치와 같은 ValueError를 재현했습니다. BeautifulSoup가 두 번째 이미지 아래에 마지막 이미지를 중첩하고, 앞 이미지를 decompose한 뒤 목록에 남은 자식을 unwrap하면서 트리에서 분리된 요소라는 예외가 발생했습니다. 이미 제거되거나 분리된 태그는 건너뛰고 표시할 수 없는 이미지는 wrapper만 제거해 주변 텍스트를 보존합니다. 제거된 head/style 등의 중복 처리도 방지하며 긴 숫자·유니코드 숫자 표 속성으로 인한 추가 ValueError를 막았습니다.

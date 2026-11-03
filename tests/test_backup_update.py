@@ -35,7 +35,7 @@ class BackupUpdateTests(unittest.TestCase):
 
     def test_server_delta_ranges_exclude_old_dates_and_keep_unknown_dates(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp);mail=root/'employee';mail.mkdir()
+            root=Path(tmp).resolve();mail=root/'employee';mail.mkdir()
             raw=mail/'sentbox.mbox'
             raw.write_bytes(self.message('Old','Mon, 01 Jan 2024 00:00:00 +0000')+
                             self.message('Recent',formatdate(usegmt=True))+self.message('Unknown','invalid')+
@@ -91,6 +91,23 @@ class BackupUpdateTests(unittest.TestCase):
                 result=SSHCollector(config).run('SYNTHETIC_SSH_PASSWORD')
             self.assertEqual(server.actions.count('prepare'),2)
             self.assertEqual(search(result,'',kind='mail')['total'],4)
+            self.assertTrue(verify_archive(result)['ok'])
+
+    def test_incremental_keeps_new_missing_file_diagnostics_and_updates_total_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config=self.fixture(root);captures=[0]
+            def exporting(*args,**kwargs):
+                folder,archive=synthetic_export(*args,**kwargs);captures[0]+=1;folder=Path(folder)
+                save(folder/'issues.json',[{'kind':'missing_attachment','capture':captures[0]}])
+                manifest=load(folder/'manifest.json');manifest['files']['issues.json']=digest_file(folder/'issues.json');save(folder/'manifest.json',manifest)
+                return str(folder),archive
+            with patch.object(helper,'run_export',side_effect=exporting):
+                result=SSHCollector(config,confirm_host=lambda *_:True).run('SYNTHETIC_SSH_PASSWORD')
+                with (root/'home/e/employee/mbox/inbox.mbox').open('ab') as stream:stream.write(self.message('Added',formatdate(usegmt=True)))
+                result=SSHCollector(config).run('SYNTHETIC_SSH_PASSWORD')
+            self.assertEqual([row['capture'] for row in load(result/'issues.json')],[1,2])
+            self.assertIn('Mail messages: 4',(result/'export-summary.txt').read_text())
+            self.assertEqual(next(row['saved'] for row in load(result/'manifest.json')['coverage'] if row['kind']=='mail_index'),4)
             self.assertTrue(verify_archive(result)['ok'])
 
     def test_old_numeric_checkpoint_migrates_without_downloading_raw_again(self):
@@ -165,7 +182,7 @@ class BackupUpdateTests(unittest.TestCase):
 
     def test_delta_retries_mail_that_changes_during_the_first_scan(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp);mail=root/'employee';mail.mkdir();raw=mail/'inbox.mbox'
+            root=Path(tmp).resolve();mail=root/'employee';mail.mkdir();raw=mail/'inbox.mbox'
             raw.write_bytes(self.message('One',formatdate(usegmt=True)))
             original=helper.recent_message;changed=[False];events=[]
             def changing(*args):
