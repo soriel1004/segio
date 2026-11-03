@@ -218,3 +218,5 @@ python ./install_live_archive.py --web-user segio \
 SSH 작업의 서버 생성 approval-check.json·mail-check.json에는 요청용 64KB 한도를 적용하지 않습니다. 첨부 목록이 큰 작업의 전송 후 invalid_metadata 오류를 수정했으며 요청·상태·설정의 작은 제어 파일 한도는 유지합니다. 새 SSH 클라이언트는 ready 작업의 검증 helper만 원자적으로 갱신해 전송 캐시를 재사용합니다. 실패 진단은 예외 원문 없이 last-failure.json에 기록합니다. 기본 웹 수집 규약과 추출 동작은 유지합니다. write_windows_version.py는 Windows 빌드 전용이며 서버에 업로드하는 6개 도구에는 포함하지 않습니다.
 
 SSH v0.4.18은 선택적인 since 요청에서 메일 바이트 범위 추가 수집과 기존 결재 기안일 필터를 사용합니다. 날짜 요청이 없는 기존 클라이언트의 전체 백업 동작은 유지합니다. 서버 Python 2.6 호환이며 최신 Windows 패키지가 개인 작업에 도구를 올리므로 별도 서버 재설치는 필요 없습니다.
+
+SSH v0.4.19는 결재 선택 CTE를 재사용하고 조회 세션의 문장별 제한 시간을 300초로 설정합니다. 운영 DB 설정은 바꾸지 않으며 SQLSTATE/고정 조회 단계만 진단으로 전달합니다. 기존 wire protocol과 SSH 업로드 파일 목록은 유지합니다.

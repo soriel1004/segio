@@ -72,7 +72,7 @@ def ssh_failure_message(code, diagnostic=None, phase=''):
         'mail_changed_retry','mail_unsafe_file','mail_unsafe_symlink','mail_path_unconfigured',
         'mail_path_missing_or_symlink','job_storage_failed','db_config_invalid','db_config_unreadable',
         'psql_unavailable','db_authentication_failed','db_permission_denied','db_schema_mismatch',
-        'db_query_timeout','db_database_missing','db_connection_failed','db_query_failed',
+        'db_query_timeout','db_database_missing','db_connection_failed','db_query_failed','db_resource_limit',
         'db_snapshot_mismatch','approval_user_not_found','cell_data_missing','db_encoding_failed'}
     code=code if isinstance(code,str) and code in codes else 'export_failed'
     message=DBCollector.error_message(code)
@@ -88,6 +88,14 @@ def ssh_failure_message(code, diagnostic=None, phase=''):
            'RuntimeError','IOError','OSError','FileNotFoundError','PermissionError',
            'UnicodeEncodeError','UnicodeDecodeError','UnicodeError'}
     details=[]
+    state=diagnostic.get('sqlstate')
+    if isinstance(state,str) and re.fullmatch('[0-9A-Z]{5}',state):details.append('SQLSTATE='+state)
+    table=diagnostic.get('query_phase')
+    tables={'counts','approval_attach_info','approval_comment_info','approval_comment_info_backup',
+            'approval_doc_backup','approval_doc_backup_backup','approval_document','approval_document_backup',
+            'approval_favorite','approval_format_info','approval_line','approval_line_backup','approval_member_info',
+            'approval_send_box','approval_send_box_backup'}
+    if isinstance(table,str) and table in tables:details.append('query='+table)
     if isinstance(diagnostic.get('exception_type'),str) and diagnostic['exception_type'] in kinds:details.append(diagnostic['exception_type'])
     number=diagnostic.get('errno')
     if type(number) is int and 0<=number<=4096:details.append('errno='+str(number))

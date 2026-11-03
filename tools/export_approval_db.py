@@ -43,6 +43,11 @@ PY2 = sys.version_info[0] == 2
 HERE = os.path.dirname(os.path.abspath(__file__))
 NULL = "__SEGIO_NULL__"
 EXPORTER_REVISION = 'db-native-paths-1'
+DB_QUERY_TIMEOUT_MS = 300000
+DB_QUERY_PHASES = ('counts','approval_attach_info','approval_comment_info','approval_comment_info_backup',
+    'approval_doc_backup','approval_doc_backup_backup','approval_document','approval_document_backup',
+    'approval_favorite','approval_format_info','approval_line','approval_line_backup','approval_member_info',
+    'approval_send_box','approval_send_box_backup')
 
 
 def text(value):
@@ -153,8 +158,9 @@ def selection_sql(username, live_scope=False, approval_since=None):
     return " UNION ".join(choices), uid
 
 
-def make_queries(username, model, live_scope=False, approval_since=None):
+def make_queries(username, model, live_scope=False, approval_since=None, selected_cte=False):
     ids, uid = selection_sql(username, live_scope, approval_since)
+    if selected_cte:ids='SELECT no FROM segio_selected'
     queries = {}
     for table in model:
         if table in ("approval_document", "approval_document_backup"):
@@ -198,13 +204,14 @@ def quote_identifier(value):
     return '"' + value + '"'
 
 
-def copy_command(query, name, columns):
+def copy_command(query, name, columns, selection=None):
     # Hex text preserves NULL vs empty text and avoids CSV multiline ambiguity
     # without requiring PostgreSQL's newer JSON functions.
     fields = ["encode(convert_to(q.%s::text,'UTF8'),'hex') AS %s" %
               (quote_identifier(c), quote_identifier(c)) for c in columns]
-    return ("\\copy (SELECT %s FROM (%s) q) TO '%s.csv' WITH CSV HEADER NULL '%s'" %
-            (",".join(fields), query, name, NULL))
+    prefix=('WITH segio_selected AS (%s) ' % selection) if selection is not None else ''
+    return ("\\copy (%sSELECT %s FROM (%s) q) TO '%s.csv' WITH CSV HEADER NULL '%s'" %
+            (prefix, ",".join(fields), query, name, NULL))
 
 
 def read_rows(path):
@@ -224,15 +231,35 @@ def read_rows(path):
     return result
 
 
+def database_sqlstates(error):
+    # PostgreSQL's ERROR/FATAL prefix follows the server's lc_messages, not
+    # necessarily the client's C locale. Keep only five-character SQLSTATEs.
+    matches=re.findall(b'(?m)^([^\\r\\n:]{1,80}):[ \\t]+([0-9A-Z]{5}):',error)
+    prefixes=(b'ERROR',b'FATAL',b'PANIC',u'오류'.encode('utf-8'),u'치명적 오류'.encode('utf-8'),u'치명적오류'.encode('utf-8'))
+    return [state for prefix,state in matches if prefix.strip() in prefixes]
+
+
+def database_diagnostic(error,output,exit_code):
+    result={}
+    states=database_sqlstates(error)
+    if states:result['sqlstate']=states[0].decode('ascii')
+    phases=re.findall(b'(?m)^SEGIO_DB_PHASE=([a-z_]+)\\r?$',output)
+    if phases and phases[-1].decode('ascii') in DB_QUERY_PHASES:result['query_phase']=phases[-1].decode('ascii')
+    if isinstance(exit_code,int) and -256<=exit_code<=256:result['psql_exit']=exit_code
+    return result
+
+
 def database_error_code(error):
     # Verbose PostgreSQL errors expose a SQLSTATE. Never return raw stderr,
     # which can contain credentials, SQL values, paths or application data.
-    states = re.findall(b"(?:ERROR|FATAL):[ \\t]+([0-9A-Z]{5}):", error)
+    states = database_sqlstates(error)
     codes = {b"28P01": "db_authentication_failed", b"28000": "db_authentication_failed",
              b"42501": "db_permission_denied", b"42P01": "db_schema_mismatch",
              b"42703": "db_schema_mismatch", b"42883": "db_schema_mismatch",
              b"57014": "db_query_timeout", b"3D000": "db_database_missing",
-             b"53100": "server_disk_full"}
+             b"53100": "server_disk_full", b"22021":"db_encoding_failed",b"22P05":"db_encoding_failed",
+             b"53200":"db_resource_limit",b"53400":"db_resource_limit",b"54000":"db_resource_limit",
+             b"54001":"db_resource_limit",b"54011":"db_resource_limit",b"54023":"db_resource_limit"}
     for state in states:
         if state in codes:
             return codes[state]
@@ -305,7 +332,7 @@ def psql_readonly(config, work, sql, binary="/usr/bin/psql", checkpoint=None):
             if key.startswith("PG"):
                 del env[key]
         env.update({"PGPASSFILE": passfile, "PGCONNECT_TIMEOUT": "5", "LC_ALL": "C",
-                    "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=60000"})
+                    "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=%d" % DB_QUERY_TIMEOUT_MS})
         command = [binary, "-X", "-q", "-w", "-h", host, "-p", "5432", "-U", user,
                    "-d", database, "-v", "ON_ERROR_STOP=1"]
         try:
@@ -316,7 +343,9 @@ def psql_readonly(config, work, sql, binary="/usr/bin/psql", checkpoint=None):
         output, error = communicate_cancellable(process,("\n".join(sql) + "\n").encode("ascii"),checkpoint)
         if process.returncode or b"SEGIO_DB_EXPORT_COMPLETE" not in output:
             code = database_error_code(error)
-            raise SafeError("%s (psql exit %d); raw errors omitted." % (code, process.returncode), code)
+            failure=SafeError("%s (psql exit %d); raw errors omitted." % (code, process.returncode), code)
+            failure.diagnostic=database_diagnostic(error,output,process.returncode)
+            raise failure
         return output
     finally:
         if os.path.exists(passfile):
@@ -326,14 +355,15 @@ def psql_readonly(config, work, sql, binary="/usr/bin/psql", checkpoint=None):
 def query_database(config, username, work, binary="/usr/bin/psql", live_scope=False, checkpoint=None, approval_since=None):
     with open(os.path.join(HERE, "approval_db_columns.json"), "rb") as stream:
         model = json.loads(stream.read().decode("utf-8"))
-    queries = make_queries(username, model, live_scope, approval_since)
+    selection,_=selection_sql(username,live_scope,approval_since)
+    queries = make_queries(username, model, live_scope, approval_since,selected_cte=True)
     sql = ["\\set ON_ERROR_STOP on", "\\set VERBOSITY verbose",
            "BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY;",
-           "SET LOCAL statement_timeout=60000;", "SET LOCAL client_encoding='UTF8';"]
+           "SET LOCAL statement_timeout=%d;" % DB_QUERY_TIMEOUT_MS, "SET LOCAL client_encoding='UTF8';"]
     counts = " UNION ALL ".join(["SELECT '%s'::text AS table_name,count(*)::text AS row_count FROM (%s) counted" % (table, queries[table]) for table in sorted(queries)])
-    sql.append(copy_command(counts, "counts", ["table_name", "row_count"]))
+    sql.extend(['\\echo SEGIO_DB_PHASE=counts',copy_command(counts, "counts", ["table_name", "row_count"],selection)])
     for table in sorted(queries):
-        sql.append(copy_command(queries[table], table, model[table]))
+        sql.extend(['\\echo SEGIO_DB_PHASE='+table,copy_command(queries[table], table, model[table],selection)])
     sql.extend(["ROLLBACK;", "\\echo SEGIO_DB_EXPORT_COMPLETE"])
     psql_readonly(config, work, sql, binary,checkpoint)
     expected = dict((r["table_name"], int(r["row_count"])) for r in read_rows(os.path.join(work, "counts.csv")))

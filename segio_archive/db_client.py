@@ -417,6 +417,8 @@ class DBCollector(PreparedDBCollector):
             'db_database_missing':'설정된 cell_000 데이터베이스를 찾지 못했습니다. [db_database_missing]',
             'db_connection_failed':'서버 작업기에서 PostgreSQL에 접속하지 못했습니다. 기존 DB 서비스와 로컬 소켓 경로를 확인하세요. [db_connection_failed]',
             'db_query_failed':'서버 결재 DB 조회를 완료하지 못했습니다. 관리자 진단을 실행하세요. [db_query_failed]',
+            'db_encoding_failed':'결재 DB 문자 인코딩 변환에 실패했습니다. 원본은 변경하지 않았습니다. SQLSTATE와 조회 단계를 확인하세요. [db_encoding_failed]',
+            'db_resource_limit':'서버 PostgreSQL의 메모리 또는 쿼리 처리 자원 한도에 걸렸습니다. SQLSTATE와 조회 단계를 확인하세요. [db_resource_limit]',
             'db_snapshot_mismatch':'결재 DB 조회 건수와 추출 결과가 일치하지 않습니다. [db_snapshot_mismatch]',
             'approval_user_not_found':'결재 DB에서 해당 직원의 프로필과 관련 문서를 찾지 못했습니다. 서버 연결 도구를 최신 버전으로 업데이트하세요. [approval_user_not_found]',
             'cell_data_missing':'서버의 셀 data 폴더가 없거나 작업기가 접근할 수 없습니다. [cell_data_missing]',

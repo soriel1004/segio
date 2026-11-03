@@ -18,7 +18,7 @@ import zipfile
 import zlib
 from optparse import OptionParser
 
-from export_approval_db import run_export, approval_cutoff, APPROVAL_DATE_REVISION, APPROVAL_DATE_PROTOCOL
+from export_approval_db import run_export, approval_cutoff, APPROVAL_DATE_REVISION, APPROVAL_DATE_PROTOCOL,DB_QUERY_PHASES
 from export_schema_from_segio_config import SafeError
 
 PROTOCOL = 'segio-live-archive/1'
@@ -30,7 +30,7 @@ MAIL_DATE_REVISION = 'file-time-merge-1'
 METADATA_REVISION = 'metadata-size-unlimited-1'
 FAILURE_CODES = set(('db_config_invalid', 'db_config_unreadable', 'psql_unavailable',
     'db_authentication_failed', 'db_permission_denied', 'db_schema_mismatch',
-    'db_query_timeout', 'db_database_missing', 'db_connection_failed', 'db_query_failed',
+    'db_query_timeout', 'db_database_missing', 'db_connection_failed', 'db_query_failed','db_resource_limit',
     'db_snapshot_mismatch', 'approval_user_not_found', 'cell_data_missing',
     'db_encoding_failed',
     'mail_path_unconfigured', 'mail_path_missing_or_symlink', 'mail_changed_retry',
@@ -60,6 +60,14 @@ def failure_details(exc, stage):
                 'encoding' if isinstance(exc, UnicodeError) else 'unexpected')
     diagnostic = {'stage': stage, 'category': category,
                   'errno': number if isinstance(number, int) else None}
+    details=getattr(exc,'diagnostic',None)
+    if isinstance(details,dict):
+        state=details.get('sqlstate')
+        if isinstance(state,(str,type(u''))) and re.match(r'\A[0-9A-Z]{5}\Z',state):diagnostic['sqlstate']=state
+        phase=details.get('query_phase')
+        if phase in DB_QUERY_PHASES:diagnostic['query_phase']=phase
+        result=details.get('psql_exit')
+        if isinstance(result,int) and -256<=result<=256:diagnostic['psql_exit']=result
     if isinstance(exc, UnicodeError):
         kinds = ('UnicodeEncodeError','UnicodeDecodeError','UnicodeTranslateError','UnicodeError')
         kind = type(exc).__name__

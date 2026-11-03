@@ -1,6 +1,7 @@
 import json
 import base64
 import os
+import re
 import subprocess
 from html import escape
 from pathlib import Path
@@ -16,6 +17,53 @@ import export_approval_db as exporter
 
 
 class DBExportTests(unittest.TestCase):
+    def test_snapshot_queries_materialize_employee_scope_once_per_copy_and_keep_read_only(self):
+        model=json.loads((Path(exporter.HERE)/'approval_db_columns.json').read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);sql=[]
+            def execute(config,work,commands,*args):
+                sql.extend(commands)
+                exporter_header='table_name,row_count\n'+''.join(table.encode().hex()+',30\n' for table in sorted(model))
+                (root/'counts.csv').write_text(exporter_header)
+                for table in model:(root/(table+'.csv')).write_text(','.join(model[table])+'\n')
+            # Empty synthetic row counts are encoded hex: 30 decodes to "0".
+            with patch.object(exporter,'psql_readonly',side_effect=execute):
+                rows,counts=exporter.query_database('unused','employee',str(root),live_scope=True)
+            copies=[command for command in sql if command.startswith('\\copy')]
+            self.assertEqual(len(copies),len(model)+1)
+            self.assertTrue(all(command.count('WITH segio_selected AS (')==1 for command in copies))
+            self.assertTrue(all('FROM segio_selected' in command for command in copies))
+            self.assertTrue(any('SERIALIZABLE READ ONLY' in command for command in sql))
+            self.assertIn('SET LOCAL statement_timeout=300000;',sql)
+            self.assertFalse(any(re.search(r'(?i)\b(CREATE|INSERT|UPDATE|DELETE|ALTER|DROP)\b',command) for command in sql))
+            self.assertEqual(counts,{table:0 for table in model})
+
+    def test_localized_sqlstates_and_query_phase_cross_safe_error_boundary_without_raw_data(self):
+        import live_export_worker as worker
+        from segio_archive.ssh_client import ssh_failure_message
+        secret='PRIVATE_PASSWORD_QUERY_AND_DOCUMENT'
+        cases=[('57014','db_query_timeout'),('53200','db_resource_limit'),('22021','db_encoding_failed'),('42601','db_query_failed')]
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);config=root/'db.conf'
+            config.write_text('DBMS=pgsql\nDBNAME=cell_000\nUSER=fixture\nPW='+secret+'\n')
+            for state,expected in cases:
+                process=Mock(returncode=1)
+                process.communicate.return_value=(b'SEGIO_DB_PHASE=counts\nSEGIO_DB_PHASE=approval_document\n',
+                    ('오류:  '+state+': '+secret+'\nCONTEXT: '+secret).encode())
+                with self.subTest(sqlstate=state),patch.object(exporter.subprocess,'Popen',return_value=process) as started:
+                    try:exporter.psql_readonly(str(config),str(root),['SELECT 1;'])
+                    except exporter.SafeError as exc:code,diagnostic=worker.failure_details(exc,'database')
+                    else:self.fail('The query failure was not propagated')
+                    self.assertEqual(code,expected)
+                    self.assertEqual(diagnostic['sqlstate'],state)
+                    self.assertEqual(diagnostic['query_phase'],'approval_document')
+                    message=ssh_failure_message(code,diagnostic,'database')
+                    self.assertIn('SQLSTATE='+state,message);self.assertIn('query=approval_document',message)
+                    self.assertNotIn(secret,message+json.dumps(diagnostic))
+                    self.assertIn('statement_timeout=300000',started.call_args.kwargs['env']['PGOPTIONS'])
+                    self.assertFalse((root/'pgpass').exists())
+        self.assertEqual(exporter.database_sqlstates(b'ERROR: bad value "PRIVATE: 57014:"\nCONTEXT: 28P01: PRIVATE\n'),[])
+
     @unittest.skipIf(os.name == 'nt', 'Legacy POSIX filename encodings')
     def test_korean_native_paths_under_ascii_locale_and_ambiguous_names(self):
         with tempfile.TemporaryDirectory() as tmp:
