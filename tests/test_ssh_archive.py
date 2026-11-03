@@ -198,7 +198,7 @@ class SSHArchiveTests(unittest.TestCase):
             checkpoint=collector.checkpoint
             def stop_when_partial():
                 if config.output.exists():
-                    for partial in config.output.glob('.segio-ssh-cache/*/contents/mail/raw/*'):
+                    for partial in (config.output/'SSH-employee/mail/raw').glob('*'):
                         if 1024*1024<=partial.stat().st_size<len(payload):
                             config.cancel.set()
                 checkpoint()
@@ -327,7 +327,7 @@ class SSHArchiveTests(unittest.TestCase):
             result=SSHCollector(config).run('SYNTHETIC_SSH_PASSWORD')
             self.assertEqual(server.actions.count('prepare'),1)
             self.assertEqual(server.reads[reads:],[])
-            self.assertEqual(result.name,'segio-ssh-employee')
+            self.assertEqual(result.name,'SSH-employee')
             self.assertEqual(json.loads((result/'manifest.json').read_text())['collector_version'],__version__)
             self.assertTrue(verify_archive(result)['ok'])
 

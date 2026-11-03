@@ -51,7 +51,7 @@ class MailFolders:
     def __init__(self,root):
         path=root/'mail/sources.json'
         data=json.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
-        self.sources={source['name']:source.get('format') for source in data.get('sources',[])
+        self.sources={source['name']:source.get('folder_format',source.get('format')) for source in data.get('sources',[])
                       if isinstance(source.get('name'),str) and source.get('format') in ('mbox','rfc822')}
         self.info=lru_cache(maxsize=8192)(self._info)
 

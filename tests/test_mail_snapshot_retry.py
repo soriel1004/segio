@@ -111,6 +111,7 @@ class MailSnapshotTests(unittest.TestCase):
         self.assertIn('LEGACY_MAIL_OK',result.stdout)
         self.assertIn('LEGACY_SSH_OK',result.stdout)
         self.assertIn('LEGACY_LARGE_VERIFY_OK',result.stdout)
+        self.assertIn('LEGACY_DELTA_RANGES_OK',result.stdout)
 
 
 if __name__=='__main__':unittest.main()

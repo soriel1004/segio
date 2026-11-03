@@ -11,15 +11,129 @@ import shutil
 import stat
 import sys
 import time
+from email.parser import Parser
+from email.utils import parsedate_tz, mktime_tz
 from optparse import OptionParser
 
-from export_approval_db import run_export
+from export_approval_db import run_export, approval_cutoff
 from export_schema_from_segio_config import SafeError
 from live_export_worker import (read_json, write_json, check_user, mail_path, inventory,
                                 fingerprint, file_identity, failure_details as worker_failure_details)
 
 PROTOCOL = 'segio-ssh-archive/1'
-REVISION = 'ssh-verification-metadata-2'
+REVISION = 'ssh-range-delta-3'
+
+
+def open_source(path):
+    return os.fdopen(os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)),'rb')
+
+
+def message_spans(path,progress=lambda value:None):
+    """MBOX offsets compatible with the Windows index; bounded Python 2.6 reads."""
+    with open_source(path) as scan:
+        with open_source(path) as envelopes:
+            first=envelopes.readline(65537)
+            if not first:return
+            if not first.startswith(b'From ') or not first.endswith(b'\n'):
+                raise SafeError('invalid_metadata')
+            start,position,carry=len(first),0,b''
+            while True:
+                block=scan.read(1024*1024)
+                if not block:break
+                data=carry+block
+                base,offset=position-len(carry),0
+                while True:
+                    found=data.find(b'\nFrom ',offset)
+                    if found<0:break
+                    boundary=base+found+1
+                    envelopes.seek(boundary)
+                    envelope=envelopes.readline(65537)
+                    if len(envelope)>65536 or not envelope.endswith(b'\n'):raise SafeError('invalid_metadata')
+                    yield start,boundary
+                    start=boundary+len(envelope)
+                    offset=found+6
+                position+=len(block)
+                progress(position)
+                carry=data[-5:]
+            if position>start:yield start,position
+
+
+def recent_message(stream,start,end,since):
+    stream.seek(start)
+    lines=[]
+    size=0
+    while stream.tell()<end and size<1024*1024:
+        line=stream.readline(min(65536,end-stream.tell()))
+        if not line or line in (b'\n',b'\r\n'):break
+        lines.append(line);size+=len(line)
+    try:
+        message=Parser().parsestr(b''.join(lines).decode('latin-1'),headersonly=True)
+        values=[message.get('Date','')]
+        values.extend(value.rsplit(';',1)[-1] for value in message.get_all('Received',[]))
+        found=False
+        for value in values:
+            stamp=parsedate_tz(value)
+            if stamp:
+                found=True
+                if mktime_tz(stamp)>=since:return True
+        return not found
+    except (ValueError,TypeError,OverflowError):
+        pass
+    return True  # Unknown dates must never silently lose a message.
+
+
+def mail_delta(request,status,since):
+    for attempt in range(1,4):
+        def report(state,**fields):
+            fields['attempt']=attempt;status(state,**fields)
+        try:return mail_delta_attempt(request,report,since)
+        except SafeError as exc:
+            if str(exc)!='mail_changed_retry' or attempt==3:raise
+        except (IOError,OSError) as exc:
+            if exc.errno!=errno.ENOENT or attempt==3:raise
+
+
+def mail_delta_attempt(request,status,since):
+    """Transfer selected message ranges directly, without server MBOX copies."""
+    before=inventory(mail_path(request['mail_template'],request['user']))
+    sources,transfers,identities=[],[],[]
+    total=sum(entry[2][2] for entry in before)
+    completed,last_report=0,[0]
+    def report(position=0):
+        now=time.time()
+        if now-last_report[0]>=1:
+            status('running',files_done=len(identities),files_total=len(before),attempt=1,
+                   completed_bytes=completed+position,total_bytes=total)
+            last_report[0]=now
+    for name,path,identity in before:
+        with open_source(path) as stream:
+            prefix=stream.read(8192)
+            kind='mbox' if not prefix or prefix.startswith(b'From ') else 'rfc822' if re.match(b'[A-Za-z][A-Za-z0-9-]*:',prefix) else 'unrecognized'
+            spans=message_spans(path,report) if kind=='mbox' else [(0,identity[2])]
+            for start,end in spans:
+                report(end)
+                if kind!='unrecognized' and not recent_message(stream,start,end,since):continue
+                stream.seek(start)
+                digest=hashlib.sha256();position=start
+                while position<end:
+                    block=stream.read(min(1024*1024,end-position))
+                    if not block:raise SafeError('mail_changed_retry')
+                    digest.update(block);position+=len(block);report(position)
+                raw=binascii.unhexlify(source_hex(name))
+                try:display=raw.decode('utf-8')
+                except UnicodeError:display=raw.decode('cp949','replace')
+                relative='mail/raw/%06d.%s' % (len(sources),'bin' if kind=='unrecognized' else 'eml')
+                source={'path':relative,'name':display,'name_bytes_hex':source_hex(name),
+                        'format':'unrecognized' if kind=='unrecognized' else 'rfc822','folder_format':kind,
+                        'bytes':end-start,'sha256':digest.hexdigest()}
+                sources.append(source)
+                transfers.append(dict(source,path=relative,source_hex=source_hex(path),source_offset=start,source_bytes=identity[2]))
+        if fingerprint(path)!=identity:raise SafeError('mail_changed_retry')
+        identities.append({'name_hex':source_hex(name),'identity':list(identity)})
+        completed+=identity[2]
+    if inventory(mail_path(request['mail_template'],request['user']))!=before:raise SafeError('mail_changed_retry')
+    status('running',files_done=len(before),files_total=len(before),attempt=1,completed_bytes=total,total_bytes=total)
+    return sources,transfers,identities
 
 
 def failure_details(exc, stage):
@@ -167,11 +281,13 @@ def prepare(root):
         write_json(status_path, value)
     try:
         user = request['user']
+        since=approval_cutoff(request.get('since'))
         if request['approvals']:
             stage = 'database'
             status('running')
-            folder, archive = run_export(request['db_config'], user, root, cell=request['cell'],
-                                         binary=request['psql'], live_scope=True, pack=False, reference_file=reference_file)
+            options=dict(cell=request['cell'],binary=request['psql'],live_scope=True,pack=False,reference_file=reference_file)
+            if since is not None:options['approval_since']=since
+            folder, archive = run_export(request['db_config'], user, root, **options)
             if archive:
                 os.unlink(archive)
             manifest = read_json(os.path.join(folder, 'manifest.json'), None)
@@ -192,7 +308,7 @@ def prepare(root):
         if request['mail']:
             stage = 'mail'
             status('running', files_done=0)
-            sources,mail_transfers,identities=mail_snapshot(request,status)
+            sources,mail_transfers,identities=mail_delta(request,status,since) if since is not None else mail_snapshot(request,status)
             transfers.extend(mail_transfers)
             for source in sources:
                 manifest['files'][source['path']]=dict((key,source[key]) for key in ('bytes','sha256'))
@@ -206,6 +322,7 @@ def prepare(root):
         manifest['ssh_export'] = {'protocol': PROTOCOL, 'job': os.path.basename(root),
             'approvals': request['approvals'], 'mail': request['mail'], 'authentication': 'administrator_ssh',
             'source_transfer': 'direct-mail-and-attachments/1'}
+        if since is not None:manifest['ssh_export']['since']=since
         manifest['warnings'].append('Export requested by SSH administrator; employee password was not verified.')
         manifest['counts']['mail_files'] = len(sources)
         manifest['coverage'].append({'kind': 'mail', 'status': 'direct_source_transfer', 'files': len(sources)})

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import zipfile
 import struct
+import time
 
 sys.path.insert(0, sys.argv[1])
 import live_export_worker as worker
@@ -77,6 +78,14 @@ try:
     assert sources[0]['sha256']==hashlib.sha256(data).hexdigest()
     assert progress[-1]['completed_bytes']==len(data)
     assert progress[-1]['files_done']==1
+    selected,ranges,checked=ssh.mail_delta(
+        {'user':'employee','mail_template':os.path.join(root,'{user}')},lambda *a,**kw:None,int(time.time())-15*86400)
+    assert len(selected)==len(ranges)==len(checked)==1
+    assert ranges[0]['source_offset']>0
+    with open(path,'rb') as stream:
+        stream.seek(ranges[0]['source_offset'])
+        assert hashlib.sha256(stream.read(ranges[0]['bytes'])).hexdigest()==ranges[0]['sha256']
+    print('LEGACY_DELTA_RANGES_OK')
     job=os.path.join(root,'.segio-ssh-'+'a'*32)
     os.mkdir(job,0o700)
     ssh.write_json(os.path.join(job,'request.json'),

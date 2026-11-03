@@ -21,7 +21,7 @@ import zipfile
 import paramiko
 
 from . import __version__
-from .archive import atomic_write
+from .archive import atomic_write,utc_now
 from .compact_mail import build_compact_catalog, digest_file
 from .db_client import DBCollector, publish_local, safe_member
 from .web import Cancelled, CollectionError
@@ -306,6 +306,8 @@ class SSHCollector:
             if status.get('protocol')!=PROTOCOL:
                 raise CollectionError('SSH 이전 작업 상태를 확인하세요.')
             if status.get('state')!='failed':
+                request=self.read_json(self.remote+'/request.json',65536)
+                if request.get('since')!=getattr(self,'since',None):raise CollectionError('이어받기 날짜가 기존 작업과 다릅니다. [SSH_INCREMENTAL_SCOPE_MISMATCH]')
                 if status.get('state')=='ready':
                     self.refresh_ready_helper()
                 self.log('이전 SSH 작업에 연결해 전송을 이어갑니다. 작업 경로: '+self.remote)
@@ -328,6 +330,7 @@ class SSHCollector:
         request = {'protocol':PROTOCOL,'user':self.config.username,'db_config':self.config.db_config,
                    'cell':self.config.cell,'mail_template':self.config.mail_template,'psql':self.config.psql,
                    'approvals':self.config.approvals,'mail':self.config.mail}
+        if getattr(self,'since',None) is not None:request['since']=self.since
         for name, data in (('request.json',request),('status.json',{'protocol':PROTOCOL,'state':'queued','stage':'initializing'})):
             with self.sftp.open(self.remote+'/'+name,'wx') as stream:
                 stream.write(json.dumps(data).encode())
@@ -404,7 +407,8 @@ class SSHCollector:
             raise CollectionError('서버 정리 기록의 직원을 확인하세요.')
         folder=Path(record['backup'])
         manifest=json.loads((folder/'manifest.json').read_text(encoding='utf-8'))
-        if (manifest.get('user')!=expected_user or manifest.get('ssh_export',{}).get('job')!=record['job']):
+        current_job=manifest.get('ssh_export',{}).get('job')
+        if (manifest.get('user')!=expected_user or record['job'] not in [current_job]+manifest.get('retained_ssh_jobs',[])):
             raise CollectionError('완료된 Windows 백업의 서버 정리 기록을 확인하세요.')
         for remote in record['paths']:
             if remote not in record['validated']:
@@ -428,7 +432,8 @@ class SSHCollector:
                 try:self.execute('cleanup')
                 except Exception:pass
             self.remove_job(remote,previously_validated=True)
-        manifest['server_cleanup']={'state':'confirmed','job':record['job']}
+        if record['job']==current_job:manifest['server_cleanup']={'state':'confirmed','job':record['job']}
+        else:manifest.setdefault('server_cleanup_history',{})[record['job']]='confirmed'
         atomic_write(folder/'manifest.json',json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
         path.unlink()
 
@@ -494,6 +499,11 @@ class SSHCollector:
                     not re.fullmatch('(?:[a-f0-9]{2}){1,8192}',str(item.get('source_hex','')))):
                 raise CollectionError('SSH 파일 검증 목록이 올바르지 않습니다.')
             source = bytes.fromhex(item['source_hex'])
+            offset=item.get('source_offset',0)
+            source_bytes=item.get('source_bytes',item['bytes'])
+            if (type(offset) is not int or type(source_bytes) is not int or offset<0 or
+                    source_bytes<0 or offset+item['bytes']>source_bytes):
+                raise CollectionError('SSH 메일 원본 범위가 올바르지 않습니다.')
             if not source.startswith(b'/') or b'\0' in source:
                 raise CollectionError('SSH 원본 경로가 올바르지 않습니다.')
             target = folder.joinpath(*path.parts)
@@ -524,17 +534,18 @@ class SSHCollector:
                 target.unlink()
                 size=0
             attributes = self.sftp.lstat(source)
-            if not stat.S_ISREG(attributes.st_mode) or attributes.st_size != item['bytes']:
+            offset=item.get('source_offset',0)
+            if not stat.S_ISREG(attributes.st_mode) or attributes.st_size != item.get('source_bytes',item['bytes']):
                 raise CollectionError('서버 원본이 변경됐습니다. 이어받기를 해제해 새로 추출하세요. [SSH_SOURCE_CHANGED]')
             with self.sftp.open(source,'rb') as incoming, target.open('ab') as outgoing:
-                incoming.seek(size)
+                incoming.seek(offset+size)
                 done += size
                 while size<item['bytes']:
                     self.checkpoint()
                     # Bound both the read queue and memory. Prefetching an
                     # entire 40GB file would build a huge request list.
                     end=min(size+1024*1024,item['bytes'])
-                    chunks=[(offset,min(32768,end-offset)) for offset in range(size,end,32768)]
+                    chunks=[(offset+position,min(32768,end-position)) for position in range(size,end,32768)]
                     blocks=incoming.readv(chunks,max_concurrent_prefetch_requests=8)
                     for (_,expected_size),block in zip(chunks,blocks):
                         self.checkpoint()
@@ -552,6 +563,8 @@ class SSHCollector:
                 raise CollectionError('내려받은 파일의 SHA-256이 일치하지 않습니다. 완료로 처리하지 않았습니다. [SSH_FILE_HASH_MISMATCH]')
         manifest=json.loads((folder/'manifest.json').read_text(encoding='utf-8'))
         snapshot=manifest.get('ssh_export',{})
+        if snapshot.get('since')!=getattr(self,'since',None):
+            raise CollectionError('서버의 추가 백업 날짜가 요청과 다릅니다. 최신 tools를 사용하세요. [SSH_INCREMENTAL_SCOPE_MISMATCH]')
         by_name={item['path']:item for item,_,_ in records}
         if (manifest.get('user')!=self.config.username or manifest.get('account_deletion_verified') is not False or
                 snapshot.get('job')!=self.remote.rsplit('/',1)[1] or snapshot.get('approvals')!=self.config.approvals or
@@ -570,36 +583,46 @@ class SSHCollector:
             self.connect(password)
             password=''
             output=self.config.output.expanduser().resolve()
-            output.mkdir(parents=True,exist_ok=True)
-            self.retry_cleanup(output)
+            from .backup_update import selection_output
+            cleanup_output=selection_output(output) if (output/'manifest.json').is_file() else output
+            self.retry_cleanup(cleanup_output)
             identity={key:getattr(self.config,key) for key in ('host','port','ssh_user','username','db_config','cell','mail_template','approvals','mail')}
-            token=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()[:24]
-            cache=output/'.segio-ssh-cache'/token
-            if cache.is_symlink() or cache.parent.is_symlink():
-                raise CollectionError('SSH 이어받기 폴더에 심볼릭 링크를 사용할 수 없습니다.')
-            if cache.exists() and not self.config.resume:
-                shutil.rmtree(cache)
-            cache.mkdir(parents=True,exist_ok=True,mode=0o700)
-            contents=cache/'contents'
-            if contents.is_symlink():
-                raise CollectionError('SSH 저장 폴더에 심볼릭 링크를 사용할 수 없습니다.')
-            contents.mkdir(exist_ok=True,mode=0o700)
-            self.begin_stage('prepare')
-            self.initialize(cache)
-            self.begin_stage('server')
-            self.wait_ready()
-            self.begin_stage('transfer','전송 목록 확인 중')
-            self.transfer(contents)
-            self.begin_stage('verify')
-            self.execute('verify')
-            local_manifest=json.loads((contents/'manifest.json').read_text(encoding='utf-8'))
-            local_manifest['collector_version']=__version__
-            atomic_write(contents/'manifest.json',json.dumps(local_manifest,ensure_ascii=False,indent=2).encode('utf-8'))
-            self.phase='Windows 검색 색인 생성'
-            self.log('메일 검색 DB와 바로보기 HTML·첨부를 만드는 중 · 추가 저장 공간이 필요합니다')
-            build_compact_catalog(contents,self.config.username,self.checkpoint,self.log,progress=self.forward_progress)
-            archive=None
-            if self.config.make_zip:
+            from .backup_update import workspace,load,save,merge,publish,named_folder
+            output,cache,contents,base,plan=workspace(output,self.config.username,identity,self.config.resume)
+            self.since=plan.get('since')
+            origin={key:value for key,value in identity.items() if key not in ('approvals','mail')}
+            if base and load(base/'manifest.json').get('backup_origin',origin)!=origin:
+                raise CollectionError('기존 백업의 SSH 서버 정보가 다릅니다. [BACKUP_ORIGIN_MISMATCH]')
+            self.log('Windows 백업 폴더: '+str(named_folder(output,self.config.username)))
+            if plan.get('published'):
+                state=load(cache/'session.json');self.remote=state['remote'];self.retired=state.get('retired',[])
+                if not self.valid_remote(self.remote):raise CollectionError('완료 작업의 정리 경로를 확인하세요.')
+                result=contents
+            else:
+                if self.since is not None:self.log('추가 백업: 마지막 완료일의 15일 전부터 결재·메일을 가져와 기존 자료와 병합합니다.')
+                self.begin_stage('prepare')
+                self.initialize(cache)
+                self.begin_stage('server')
+                self.wait_ready()
+                self.begin_stage('transfer','전송 목록 확인 중')
+                self.transfer(contents)
+                self.begin_stage('verify')
+                self.execute('verify')
+                local_manifest=load(contents/'manifest.json')
+                local_manifest['collector_version']=__version__
+                local_manifest['backup_origin']=origin
+                save(contents/'manifest.json',local_manifest)
+                self.phase='Windows 검색 색인 생성'
+                self.log('메일 검색 DB와 바로보기 HTML·첨부를 만드는 중 · 완료한 페이지는 재사용합니다')
+                if base:
+                    merge(base,contents,cache/'merged',self.checkpoint,self.log,self.forward_progress)
+                    contents=cache/'merged'
+                else:
+                    build_compact_catalog(contents,self.config.username,self.checkpoint,self.log,progress=self.forward_progress)
+                local_manifest=load(contents/'manifest.json');local_manifest['backup_origin']=origin
+                local_manifest['last_backup_completed_at']=utc_now();save(contents/'manifest.json',local_manifest)
+            archive=cache/'archive.zip' if plan.get('published') and self.config.make_zip and (cache/'archive.zip').is_file() else None
+            if self.config.make_zip and not plan.get('published'):
                 self.begin_stage('zip')
                 archive=cache/'archive.zip'
                 size=sum(p.stat().st_size for p in contents.rglob('*') if p.is_file())
@@ -619,7 +642,9 @@ class SSHCollector:
                 self.report('zip',zipped_bytes,size,'bytes','ZIP 생성 완료',force=True)
             self.checkpoint()
             self.begin_stage('publish')
-            result=publish_local(contents,archive,output,self.config.username,prefix='segio-ssh-')
+            if not plan.get('published'):
+                result=publish(contents,named_folder(output,self.config.username),cache,base,plan.get('revision'))
+            if archive is not None:os.replace(archive,output/(result.name+'.zip'))
             self.begin_stage('cleanup')
             record={'identity':self.cleanup_identity(),'backup':str(result),
                     'job':posixpath.basename(self.remote),'paths':list(dict.fromkeys([self.remote]+self.retired)),
@@ -634,6 +659,10 @@ class SSHCollector:
                 manifest['server_cleanup']={'state':'pending','job':record['job']}
                 atomic_write(result/'manifest.json',json.dumps(manifest,ensure_ascii=False,indent=2).encode('utf-8'))
                 self.log('Windows 백업은 완료됐지만 서버 정리는 대기 중입니다. 다음 SSH 백업 접속 시 자동 재시도합니다.')
+            final_manifest=load(result/'manifest.json');final_manifest['last_backup_completed_at']=utc_now()
+            for kind in ('approvals','mail'):
+                if getattr(self.config,kind):final_manifest.setdefault('backup_completed_by_kind',{})[kind]=final_manifest['last_backup_completed_at']
+            save(result/'manifest.json',final_manifest)
             shutil.rmtree(cache)
             detail='서버 임시 파일 정리 대기 · Windows 백업 저장 완료' if pending.exists() else '서버 임시 파일 삭제 확인 · 백업 저장 완료'
             self.report('cleanup',1,1,'steps',detail,force=True)

@@ -96,7 +96,7 @@ class App(tk.Tk):
         self.check_button.pack(side='left',padx=(0,8))
         ttk.Button(actions, text="보관함 열기", command=self.open_archive).pack(side="left", padx=8)
         ttk.Button(actions, text="파일 무결성 검증", command=self.verify).pack(side="left")
-        ttk.Button(actions, text="기존 백업 갱신", command=self.open_archive).pack(side="left", padx=8)
+        ttk.Button(actions, text="기존 백업 갱신", command=self.refresh_archive).pack(side="left", padx=8)
         ttk.Label(panel, textvariable=self.status, wraplength=770).pack(anchor="w", pady=(14, 6))
         progress_panel=ttk.LabelFrame(panel,text='백업 진행 상황',padding=10)
         progress_panel.pack(fill='x',pady=(0,8))
@@ -201,6 +201,10 @@ class App(tk.Tk):
     def start(self):
         if self.running:
             return
+        if self.viewer and self.viewer.is_busy:
+            return messagebox.showinfo('삭제 처리 중','삭제 작업이 끝난 뒤 추가 백업을 시작하세요.')
+        if self.viewer:
+            self.viewer.close();self.viewer=None
         self.local_conversion = False
         self.connection_check = False
         if not self.approvals.get() and not self.mail.get():
@@ -335,9 +339,37 @@ class App(tk.Tk):
         self.status.set('현재 전송을 중단합니다. SSH 임시 자료는 다음 실행의 이어받기를 위해 보존합니다.')
 
     def select_archive(self):
-        value = filedialog.askdirectory(title="index.html과 manifest.json이 있는 보관 폴더",
+        value = filedialog.askdirectory(title="직원 백업 폴더 또는 중단된 contents 폴더 선택",
                                         initialdir=str(self.last_archive or self.folder.get()))
         return Path(value) if value else None
+
+    def refresh_archive(self):
+        if self.running:return
+        path=self.select_archive()
+        if not path:return
+        from .backup_update import resolve_selection,selection_output,complete,load
+        try:
+            path=resolve_selection(path,self.user.get().strip())
+            manifest=load(path/'manifest.json')
+            self.user.set(manifest['user'])
+            self.folder.set(str(selection_output(path)))
+            if complete(path) and selection_output(path)==path.parent:
+                self.status.set('추가 백업 준비 완료: 서버 SSH 암호를 입력하고 수집 시작을 누르세요. 마지막 완료일의 15일 전부터 병합합니다.')
+                if self.ssh_password.get() or self.ssh_key.get():self.start()
+                return
+            self.local_conversion=True;self.connection_check=False;self.running=True
+            self.cancel_event=threading.Event()
+            self.start_button.config(state='disabled');self.check_button.config(state='disabled');self.stop_button.config(state='normal')
+            self.begin_progress('update')
+            self.status.set('중단된 다운로드의 원본을 검증하고 메일 생성·검색을 이어갑니다. 서버에서 다시 받지 않습니다.')
+            threading.Thread(target=self.archive_worker,args=(path,self.archive_identity()),daemon=True).start()
+        except Exception as exc:
+            self.status.set('백업 갱신 폴더를 확인하세요.')
+            messagebox.showerror('백업 갱신',str(exc))
+
+    def archive_identity(self):
+        try:return {'host':self.ssh_host.get().strip(),'port':int(self.ssh_port.get()),'ssh_user':self.ssh_user.get().strip()}
+        except ValueError:return None
 
     def open_archive(self):
         if self.viewer and self.viewer.is_busy:
@@ -361,7 +393,7 @@ class App(tk.Tk):
                         self.stop_button.config(state='normal')
                         self.begin_progress('update')
                         self.status.set('기존 백업의 메일 본문·첨부를 바로보기 파일로 변환합니다. 서버 접속 없이 진행합니다.')
-                        threading.Thread(target=self.archive_worker,args=(path,),daemon=True).start()
+                        threading.Thread(target=self.archive_worker,args=(path,self.archive_identity()),daemon=True).start()
                         return
                     self.status.set('보관함 목록·검색 화면을 준비합니다. 서버에서 자료를 다시 받지 않습니다.')
                     self.update_idletasks()
@@ -377,20 +409,20 @@ class App(tk.Tk):
             else:
                 messagebox.showerror("보관함 확인", "선택한 폴더에 index.html이 없습니다.")
 
-    def archive_worker(self,path):
-        from .portable_mail import prepare_archive
+    def archive_worker(self,path,identity=None):
+        from .backup_update import repair_local
         from .web import Cancelled
         def checkpoint():
             if self.cancel_event.is_set():
                 raise Cancelled('메일 변환을 중단했습니다. 기존 백업 갱신을 다시 누르면 완료한 메일을 재사용합니다.')
         try:
-            prepare_archive(path,checkpoint,lambda message:self.events.put(('log',message)),
-                progress=lambda value:self.events.put(('progress',value)))
-            self.events.put(('archive_ready',path))
+            result=repair_local(path,checkpoint,lambda message:self.events.put(('log',message)),
+                progress=lambda value:self.events.put(('progress',value)),origin=identity)
+            self.events.put(('archive_ready',result))
         except Cancelled as exc:
             self.events.put(('archive_error',str(exc)))
         except Exception as exc:
-            self.events.put(('archive_error','메일 바로보기 변환에 실패했습니다. 저장 공간과 파일 무결성을 확인하세요. ['+type(exc).__name__+']'))
+            self.events.put(('archive_error',str(exc) if isinstance(exc,CollectionError) else '다운로드가 덜 끝났거나 원본을 읽지 못했습니다. SSH 암호를 입력하고 수집 시작으로 이어받으세요. ['+type(exc).__name__+']'))
 
     def verify(self):
         path = self.select_archive()
