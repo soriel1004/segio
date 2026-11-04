@@ -204,8 +204,8 @@ class Access(paramiko.ServerInterface):
                         request[field]=self.owner.path(request[field]).as_posix()
                     request_path.write_text(json.dumps(request),encoding='utf-8')
                     prepare=helper.prepare
+                    namespace=prepare.__globals__.copy()
                     if os.name=='nt':
-                        namespace=prepare.__globals__.copy()
                         write_json=namespace['write_json']
                         def serialized_write(path,value):
                             with self.owner.metadata_lock:
@@ -218,8 +218,17 @@ class Access(paramiko.ServerInterface):
                                         if getattr(exc,'winerror',None) not in (5,32,33) or time.monotonic()>=deadline:raise
                                         time.sleep(.01)
                         namespace['write_json']=serialized_write
-                        prepare=types.FunctionType(prepare.__code__,namespace)
-                    threading.Thread(target=prepare,args=(str(root),),daemon=True).start()
+                    prepare=types.FunctionType(prepare.__code__,namespace,argdefs=prepare.__defaults__)
+                    def run_prepare():
+                        try:prepare(str(root))
+                        except Exception as exc:
+                            # Test adapters must fail promptly if their worker
+                            # cannot even enter the deployed helper's try block.
+                            with self.owner.metadata_lock:
+                                helper.write_json(str(root/'status.json'),{'protocol':helper.PROTOCOL,
+                                    'state':'failed','stage':'initializing','code':'export_failed',
+                                    'diagnostic':{'category':'fixture','exception_type':type(exc).__name__}})
+                    threading.Thread(target=run_prepare,daemon=True).start()
                     channel.send_exit_status(0)
                 elif action=='verify':
                     helper.verify_sources(str(root))
