@@ -3,6 +3,7 @@ from contextlib import closing, contextmanager
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import sqlite3
@@ -265,14 +266,17 @@ def _delete_items(root, ids, revision, checkpoint, report, fault):
                     if item is None:
                         raise CollectionError('결재 원본 색인이 일치하지 않습니다.')
                     safe_member(html)
-                    if not html.startswith('documents/') or len(Path(html).parts)!=3:
+                    parts=Path(html).parts
+                    if not (len(parts)==3 and parts[0]=='documents' or
+                            len(parts)==4 and parts[0]=='documents' and re.fullmatch(r'b-[0-9a-f]{2}',parts[1])):
                         raise CollectionError('결재 경로가 올바르지 않습니다.')
                     prefix=Path(html).parent.as_posix()+'/'
                     for attachment in item.get('attachments',[]):
                         name=attachment['path']
                         if name in files and name not in protected:
                             parts=Path(name).parts
-                            if len(parts)<4 or parts[0]!='documents' or parts[2]!='attachments':
+                            if not (len(parts)>=4 and parts[0]=='documents' and parts[2]=='attachments' or
+                                    len(parts)>=5 and parts[0]=='documents' and re.fullmatch(r'b-[0-9a-f]{2}',parts[1]) and parts[3]=='attachments'):
                                 raise CollectionError('첨부 파일 경로가 올바르지 않습니다.')
                             remove.add(name)
                 else:

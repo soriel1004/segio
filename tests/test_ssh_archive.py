@@ -252,7 +252,7 @@ class SSHArchiveTests(unittest.TestCase):
             with patch.object(exporter,'query_database',return_value=(rows,counts)):
                 result=collector.run('SYNTHETIC_SSH_PASSWORD')
             self.assertEqual(server.workspace_requests,['/backup'])
-            self.assertEqual((result/'documents/1/attachments/1.bin').read_bytes(),payload)
+            self.assertEqual((result/(exporter.document_directory('1')+'/attachments/1.bin')).read_bytes(),payload)
             self.assertEqual(source.read_bytes(),payload)
             self.assertEqual((result/'mail/raw/000000.mbox').read_bytes(),original)
             self.assertTrue(verify_archive(result)['ok'])

@@ -22,7 +22,7 @@ import test_search_page as fixtures
 
 
 class LocalDeleteTests(unittest.TestCase):
-    def fixture(self,root,shared=False):
+    def fixture(self,root,shared=False,sharded=False):
         fixtures.SearchPageTests().card_fixture(root)
         manifest=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
         catalog=json.loads((root/'catalog.json').read_text(encoding='utf-8'))
@@ -37,6 +37,17 @@ class LocalDeleteTests(unittest.TestCase):
                 manifest['files'][attachment['path']]=manifest['files'].pop(name)
         if shared:
             catalog['items'][1]['attachments']=[catalog['items'][0]['attachments'][0]]
+        if sharded:
+            mapping={name:name.replace('documents/','documents/b-01/',1) for name in manifest['files'] if name.startswith('documents/')}
+            for old,new in mapping.items():
+                target=root/new;target.parent.mkdir(parents=True,exist_ok=True);(root/old).rename(target)
+                manifest['files'][new]=manifest['files'].pop(old)
+            for item in catalog['items']:
+                item['path']=mapping[item['path']];item['json']=mapping[item['json']]
+                for attachment in item['attachments']:attachment['path']=mapping[attachment['path']]
+            with closing(sqlite3.connect(root/'catalog.sqlite3')) as db:
+                for item in catalog['items']:db.execute('UPDATE items SET html=? WHERE id=?',(item['path'],'approval-'+item['id']))
+                db.commit()
         (root/'catalog.json').write_text(json.dumps(catalog,ensure_ascii=False),encoding='utf-8')
         source='mail/raw/000000.mbox'
         (root/'mail/sources.json').write_text(json.dumps({'user':'synthetic','sources':[
@@ -59,6 +70,17 @@ class LocalDeleteTests(unittest.TestCase):
         with path.open('rb') as stream:
             stream.seek(record['begin'])
             return stream.read(record['end']-record['begin'])
+
+    def test_bucketed_approval_deletion_removes_body_raw_data_and_attachments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();self.fixture(root,sharded=True)
+            plan=preview(root,['approval-current'])
+            delete_items(root,['approval-current'],plan['revision'])
+            self.assertFalse((root/'documents/b-01/current/document.html').exists())
+            self.assertFalse((root/'documents/b-01/current/database.json').exists())
+            self.assertFalse((root/'documents/b-01/current/attachments/한글 #첨부.txt').exists())
+            self.assertTrue((root/'documents/b-01/old/document.html').exists())
+            self.assertTrue(verify_archive(root)['ok'])
 
     def snapshot(self,root):
         manifest=json.loads((root/'manifest.json').read_text(encoding='utf-8'))

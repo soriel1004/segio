@@ -2,6 +2,7 @@ import json
 import base64
 import os
 import re
+import errno
 import subprocess
 from html import escape
 from pathlib import Path
@@ -17,6 +18,41 @@ import export_approval_db as exporter
 
 
 class DBExportTests(unittest.TestCase):
+    def test_bucketed_documents_and_history_survive_flat_directory_limit_and_keep_links(self):
+        from bs4 import BeautifulSoup
+        import live_export_worker as worker
+        from segio_archive.ssh_client import ssh_failure_message
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();cell=root/'cell';(cell/'data/approval/upload').mkdir(parents=True)
+            (cell/'data/approval/upload/file.txt').write_bytes(b'EXACT_ATTACHMENT')
+            model=json.loads((Path(exporter.HERE)/'approval_db_columns.json').read_text())
+            rows={table:[] for table in model}
+            rows['approval_document']=[{'no':str(n),'uid':'employee','title':'Synthetic','context':'<p>body</p>'} for n in range(1,351)]
+            rows['approval_document_backup']=[{'no':'1','id':str(n),'uid':'employee','title':'Historical','context':'<p>old</p>'} for n in range(1,101)]
+            rows['approval_member_info']=[{'uid':'employee','rname':'Synthetic'}]
+            rows['approval_attach_info']=[{'no':'1','doc_no':'1','fname':'file.txt','fpath':'file.txt'}]
+            bundle=exporter.Bundle(str(root/'archive'),str(cell),'employee')
+            documents=root/'archive/documents';mkdir=os.mkdir
+            def limited(path,mode=0o777,**kwargs):
+                path=Path(path)
+                if path.parent==documents and documents.exists() and len(list(documents.iterdir()))>=300:
+                    raise OSError(errno.EMLINK,'Synthetic directory fanout limit')
+                return mkdir(path,mode,**kwargs)
+            with patch.object(exporter.os,'mkdir',side_effect=limited):
+                items=exporter.render_bundle(bundle,rows,{table:len(value) for table,value in rows.items()},allow_empty=True)
+            self.assertEqual(len(items),450)
+            self.assertLessEqual(len(list(documents.iterdir())),256)
+            self.assertEqual(len({item['path'] for item in items}),450)
+            for item in (items[0],items[-1]):
+                page=root/'archive'/item['path'];soup=BeautifulSoup(page.read_text(),'html.parser')
+                self.assertEqual((page.parent/soup.select_one('.navigation a')['href']).resolve(),root/'archive/index.html')
+                link=soup.select_one('li a')
+                self.assertEqual((page.parent/link['href']).resolve().read_bytes(),b'EXACT_ATTACHMENT')
+            error=OSError(errno.EMLINK,'PRIVATE_FILE_PATH')
+            code,diagnostic=worker.failure_details(error,'database')
+            self.assertEqual(code,'server_directory_limit')
+            self.assertNotIn('PRIVATE_FILE_PATH',ssh_failure_message(code,diagnostic))
+
     def test_snapshot_queries_materialize_employee_scope_once_per_copy_and_keep_read_only(self):
         model=json.loads((Path(exporter.HERE)/'approval_db_columns.json').read_text())
         with tempfile.TemporaryDirectory() as tmp:
@@ -106,7 +142,7 @@ class DBExportTests(unittest.TestCase):
                 unpack_verified(root/'output/segio-employee.zip',target,'employee')
                 self.assertTrue(verify_archive(target)['ok'])
                 for number in range(2):
-                    self.assertEqual((target/('documents/1/attachments/%d.txt'%(number+1))).read_bytes(),
+                    self.assertEqual((target/(exporter.document_directory('1')+'/attachments/%d.txt'%(number+1))).read_bytes(),
                                      b'SYNTHETIC_ATTACHMENT_KEPT_EXACTLY_'+str(number).encode('ascii'))
 
     def test_encoding_diagnostic_contains_no_document_fragments(self):

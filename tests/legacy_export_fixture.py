@@ -57,7 +57,7 @@ def main(root):
             body = stream.read()
         assert record['bytes'] == len(body)
         assert record['sha256'] == hashlib.sha256(body).hexdigest()
-    with open(os.path.join(folder,'documents/1/document.html'),'rb') as stream:
+    with open(os.path.join(folder,exporter.document_directory('1'),'document.html'),'rb') as stream:
         page = stream.read().decode('utf-8')
     assert u'\ud55c\uae00 \uacb0\uc7ac \ubcf8\ubb38' in page
     assert page.count('data:image/png;base64,') == 2

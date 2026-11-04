@@ -193,6 +193,22 @@ def merge(base,incoming,stage,checkpoint=lambda:None,log=lambda _:None,progress=
     catalog=load(stage/'catalog.json')
     by_id={item['id']:item for item in catalog['items']}
     fresh=load(incoming/'catalog.json')
+    replacing={item['id'] for item in fresh['items']}
+    keep=[item for item in catalog['items'] if item['id'] not in replacing]+fresh['items']
+    protected={name for item in keep for name in [item['path'],item['json']]+[a['path'] for a in item.get('attachments',[])]}
+    # Moving an existing ID to a bucket must not leave an orphaned old page
+    # behind after later deletion. Attachments referenced by other versions stay.
+    obsolete_directories=set()
+    for item in fresh['items']:
+        previous=by_id.get(item['id'])
+        if previous and previous['path']!=item['path']:
+            safe_member(previous['path'])
+            directory=Path(previous['path']).parent.as_posix()
+            if not directory.startswith('documents/'):raise CollectionError('기존 결재 경로를 확인하세요.')
+            obsolete_directories.add(directory)
+    for name in list(files):
+        if name not in protected and any(parent.as_posix() in obsolete_directories for parent in Path(name).parents):
+            (stage/name).unlink();files.pop(name)
     for item in fresh['items']:
         by_id[item['id']]=item
         for name in [item['path'],item['json']]+[a['path'] for a in item.get('attachments',[])]:
@@ -263,6 +279,7 @@ def merge(base,incoming,stage,checkpoint=lambda:None,log=lambda _:None,progress=
     files['catalog.sqlite3']=digest_file(stage/'catalog.sqlite3')
     result['counts']['mail_files']=len(old_sources['sources'])
     result.update(ssh_export=new['ssh_export'],collector_version=new['collector_version'],finished_at=new.get('finished_at',old.get('finished_at')))
+    if new.get('document_layout'):result['document_layout']='catalog-paths/1'
     result['retained_ssh_jobs']=list(dict.fromkeys(old.get('retained_ssh_jobs',[])+[old['ssh_export']['job']]))
     result['warnings']=list(dict.fromkeys(old.get('warnings',[])+new.get('warnings',[])))
     result.pop('portable_mail',None);result.pop('browser_index',None)

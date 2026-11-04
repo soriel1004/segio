@@ -209,7 +209,14 @@ class Access(paramiko.ServerInterface):
                         write_json=namespace['write_json']
                         def serialized_write(path,value):
                             with self.owner.metadata_lock:
-                                return write_json(path,value)
+                                # Emulate POSIX replacement across transient
+                                # Windows scanner/handle sharing violations.
+                                deadline=time.monotonic()+2
+                                while True:
+                                    try:return write_json(path,value)
+                                    except OSError as exc:
+                                        if getattr(exc,'winerror',None) not in (5,32,33) or time.monotonic()>=deadline:raise
+                                        time.sleep(.01)
                         namespace['write_json']=serialized_write
                         prepare=types.FunctionType(prepare.__code__,namespace)
                     threading.Thread(target=prepare,args=(str(root),),daemon=True).start()
@@ -245,7 +252,7 @@ class Access(paramiko.ServerInterface):
 class SSHServer:
     def __init__(self,root,key=None):
         self.root=Path(root).resolve()
-        self.metadata_lock=threading.Lock()
+        self.metadata_lock=threading.RLock()
         (self.root/'jobs').mkdir(exist_ok=True)
         self.key=key or paramiko.RSAKey.generate(2048)
         self.reads,self.actions,self.transports=[],[],[]
@@ -261,6 +268,10 @@ class SSHServer:
         self.thread.start()
 
     def path(self,path):
+        with self.metadata_lock:
+            return self.resolved_path(path)
+
+    def resolved_path(self,path):
         value=os.fsdecode(path)
         if value=='/backup' or value.startswith('/backup/.segio-ssh-'):
             value=str(self.root/'jobs'/value[len('/backup/'):]) if value!='/backup' else str(self.root/'jobs')

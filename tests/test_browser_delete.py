@@ -111,6 +111,19 @@ class BrowserDeleteTests(unittest.TestCase):
             from segio_archive.portable_mail import prepare_archive
             prepare_archive(target);self.assertTrue(verify_archive(target)['ok'])
 
+    def test_browser_deletes_bucketed_approval_and_keeps_other_documents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'before';root.mkdir();deletion.LocalDeleteTests().fixture(root,sharded=True)
+            with self.opened(root) as (page,errors):
+                page.evaluate("async()=>{const plan=await browserEditor.preview(['approval-current']);await browserEditor.request('start',{plan:plan.plan,confirmation:'delete-selected'})}")
+                status=self.wait_job(page);self.assertEqual(status['state'],'done',status)
+                target=Path(tmp)/'after';target.mkdir();self.exported(page,target)
+                self.assertEqual(errors,[])
+            self.assertFalse((target/'documents/b-01/current/document.html').exists())
+            self.assertFalse((target/'documents/b-01/current/attachments/한글 #첨부.txt').exists())
+            self.assertTrue((target/'documents/b-01/old/document.html').exists())
+            self.assertTrue(verify_archive(target)['ok'])
+
     def test_confirmation_button_deletes_and_reloads_the_same_index(self):
         from playwright.sync_api import expect
         with tempfile.TemporaryDirectory() as tmp:

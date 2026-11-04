@@ -93,6 +93,39 @@ class BackupUpdateTests(unittest.TestCase):
             self.assertEqual(search(result,'',kind='mail')['total'],4)
             self.assertTrue(verify_archive(result)['ok'])
 
+    def test_flat_backup_updates_to_bucketed_paths_without_orphaned_bodies(self):
+        import export_approval_db as exporter
+        from segio_archive.local_delete import preview,delete_items
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config=self.fixture(root)
+            with patch.object(helper,'run_export',side_effect=synthetic_export):
+                result=SSHCollector(config,confirm_host=lambda *_:True).run('SYNTHETIC_SSH_PASSWORD')
+            def bucketed(*args,**kwargs):
+                folder,archive=synthetic_export(*args,**kwargs);folder=Path(folder)
+                manifest=load(folder/'manifest.json');catalog=load(folder/'catalog.json')
+                for item in catalog['items']:
+                    for key in ('path','json'):
+                        old=item[key];new=exporter.document_directory(item['id'])+'/'+Path(old).name
+                        target=folder/new;target.parent.mkdir(parents=True,exist_ok=True)
+                        (folder/old).rename(target);item[key]=new
+                        manifest['files'][new]=manifest['files'].pop(old)
+                save(folder/'catalog.json',catalog)
+                manifest['files']['catalog.json']=digest_file(folder/'catalog.json')
+                manifest['document_layout']='bucket-sha256-1';save(folder/'manifest.json',manifest)
+                return str(folder),archive
+            with patch.object(helper,'run_export',side_effect=bucketed):
+                result=SSHCollector(config).run('SYNTHETIC_SSH_PASSWORD')
+            page=exporter.document_directory('1')+'/document.html'
+            self.assertTrue((result/page).exists())
+            self.assertFalse((result/'documents/1/document.html').exists())
+            self.assertFalse((result/'documents/1/database.json').exists())
+            self.assertFalse(any(name.startswith('documents/1/') for name in load(result/'manifest.json')['files']))
+            self.assertTrue(verify_archive(result)['ok'])
+            plan=preview(result,['approval-1']);delete_items(result,['approval-1'],plan['revision'])
+            self.assertFalse((result/page).exists())
+            self.assertEqual(search(result,'',kind='mail')['total'],3)
+            self.assertTrue(verify_archive(result)['ok'])
+
     def test_incremental_keeps_new_missing_file_diagnostics_and_updates_total_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve();server,config=self.fixture(root);captures=[0]

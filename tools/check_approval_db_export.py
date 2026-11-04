@@ -124,17 +124,17 @@ def main():
                     assert secret.encode() not in path.read_bytes()
                     assert path.stat().st_mode & 0o777 == 0o600
             assert not (folder / "private-query").exists()
-            raw = json.loads((folder / "documents/1/database.json").read_text())
+            raw = json.loads((folder / (exporter.document_directory("1") + "/database.json")).read_text())
             assert raw["document"]["doc_id"] == "" and raw["document"]["reference"] is None
             assert raw["document"]["context"] == encoded_context
-            signature_raw = json.loads((folder / "documents/2/database.json").read_text())
+            signature_raw = json.loads((folder / (exporter.document_directory("2") + "/database.json")).read_text())
             assert signature_raw["related"]["approval_line"][0]["sign"] == encoded_signature
             assert manifest["display_decoding"]["base64_signature"] == 1
             assert manifest["display_decoding"]["urlencoded_html"] == 1
             assert "\n" not in str(raw["document"]["no"])
-            assert (folder / "documents/1/attachments/1.hwp").read_bytes() == b"SYNTHETIC_ATTACHMENT_CONTENT"
-            assert not (folder / "documents/4").exists() and not (folder / "documents/6").exists()
-            assert (folder / "documents/20-history-200/document.html").is_file()
+            assert (folder / (exporter.document_directory("1") + "/attachments/1.hwp")).read_bytes() == b"SYNTHETIC_ATTACHMENT_CONTENT"
+            assert not (folder / exporter.document_directory("4")).exists() and not (folder / exporter.document_directory("6")).exists()
+            assert (folder / (exporter.document_directory("20-history-200") + "/document.html")).is_file()
             assert all(p.read_bytes() == data for p, data in originals.items())
             assert run("SELECT count(*) FROM approval_document;", "cell_000") == before
             bundle = exporter.Bundle(str(folder), str(cell), "target")
@@ -230,7 +230,7 @@ def main():
             assert live_manifest['snapshot_rows']['approval_document'] == 9
             assert live_manifest['snapshot_rows']['approval_document_backup'] == 2
             for excluded in (4, 6, 10, 11, 12, 15, 16):
-                assert not (live_copy/'documents'/str(excluded)).exists()
+                assert not (live_copy/exporter.document_directory(str(excluded))).exists()
             assert verify_archive(live_copy)['ok']
             import sqlite3
             with closing(sqlite3.connect(live_copy/'catalog.sqlite3')) as connection:
@@ -254,13 +254,13 @@ def main():
                 assert page.evaluate("typeof window.UNSAFE") == "undefined"
                 page.locator("#q").fill("유니코드 본문")
                 assert page.locator("article").count() == 1
-                page.goto(viewer.url.replace("index.html", "documents/1/document.html"))
+                page.goto(viewer.url.replace("index.html", exporter.document_directory("1") + "/document.html"))
                 assert "유니코드 본문 A+B" in page.locator("body").inner_text()
                 assert "의견 작성자 이름" in page.locator("body").inner_text()
                 assert page.evaluate("typeof window.UNSAFE") == "undefined"
                 assert not external
                 assert page.locator("img").first.get_attribute("src").startswith("data:image/png;base64,")
-                page.goto(viewer.url.replace("index.html", "documents/2/document.html"))
+                page.goto(viewer.url.replace("index.html", exporter.document_directory("2") + "/document.html"))
                 signatures = page.locator('img[src^="data:image/jpeg;base64,"]')
                 assert signatures.count() == 1
                 assert signatures.first.evaluate("img => img.complete && img.naturalWidth === 1")

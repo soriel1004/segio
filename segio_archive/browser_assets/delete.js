@@ -160,8 +160,8 @@ class BrowserEditor {
             const sources=originals['mail/sources.json']?JSON.parse(await (await checked(root,'mail/sources.json',originals,()=>this.checkpoint())).text()):{sources:[]},raw=new Set(),updated=new Map();
             for(const item of plan.selected){let prefix;
                 if(item.kind==='approval'){
-                    const record=catalog.items.find(entry=>'approval-'+entry.id===item.id&&entry.path===item.html);if(!record||!/^documents\/[^/]+\/[^/]+$/.test(item.html))fail('결재 원본 색인이 올바르지 않습니다.');prefix=item.html.slice(0,item.html.lastIndexOf('/')+1);
-                    for(const attachment of record.attachments||[])if(Object.hasOwn(files,attachment.path)&&!protectedNames.has(attachment.path)){if(!/^documents\/[^/]+\/attachments\//.test(attachment.path))fail('결재 첨부 경로가 올바르지 않습니다.');removeNames.add(attachment.path)}
+                    const record=catalog.items.find(entry=>'approval-'+entry.id===item.id&&entry.path===item.html);if(!record||!/^documents\/(?:b-[0-9a-f]{2}\/)?[^/]+\/[^/]+$/.test(item.html))fail('결재 원본 색인이 올바르지 않습니다.');prefix=item.html.slice(0,item.html.lastIndexOf('/')+1);
+                    for(const attachment of record.attachments||[])if(Object.hasOwn(files,attachment.path)&&!protectedNames.has(attachment.path)){if(!/^documents\/(?:b-[0-9a-f]{2}\/)?[^/]+\/attachments\//.test(attachment.path))fail('결재 첨부 경로가 올바르지 않습니다.');removeNames.add(attachment.path)}
                 }else{raw.add(rows(db,'SELECT source FROM mail_records WHERE id=?',[item.id])[0].source);prefix=pagePath(item.id).replace(/index\.html$/,'')}
                 for(const name of Object.keys(files))if(name.startsWith(prefix)&&!protectedNames.has(name))removeNames.add(name);
             }

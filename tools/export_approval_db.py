@@ -64,6 +64,14 @@ def escape(value):
     return text(value).replace(u"&", u"&amp;").replace(u"<", u"&lt;").replace(u">", u"&gt;").replace(u'"', u"&quot;").replace(u"'", u"&#39;")
 
 
+def document_directory(identity):
+    identity=text(identity)
+    if not re.match(r'\A[0-9]+(?:-history-[0-9]+)?\Z',identity):
+        raise SafeError('Unexpected document key; archive not completed.')
+    bucket=hashlib.sha256(identity.encode('ascii')).hexdigest()[:2]
+    return 'documents/b-%s/%s' % (bucket,identity)
+
+
 def decode_display_markup(value):
     """Unwrap confirmed document encodings; leave ordinary HTML/text intact.
 
@@ -589,7 +597,7 @@ class Bundle:
         extension = os.path.splitext(text(row["fname"]))[1]
         if not re.match(r"^\.[A-Za-z0-9]{1,10}$", extension):
             extension = ".bin"
-        relative = "documents/%s/attachments/%s%s" % (document, row["no"], extension)
+        relative = document_directory(document)+"/attachments/%s%s" % (row["no"], extension)
         if self.reference_file is not None:
             # SSH records a verified source reference; no server-side copy.
             details = self.reference_file(path, relative)
@@ -699,7 +707,9 @@ def render_bundle(bundle, rows, counts, allow_empty=False):
         raw = {"source": source, "document": document, "related": related,
                "format": formats.get(document.get("fno")),
                "value_format": "Database text values; JSON null preserves SQL NULL"}
-        raw_path = "documents/%s/database.json" % identity
+        directory=document_directory(identity)
+        root_link='../'*len(directory.split('/'))
+        raw_path = directory+'/database.json'
         bundle.write(raw_path, json.dumps(raw, ensure_ascii=False, indent=2))
         context, search = bundle.freeze(document.get("context"))
         profile = members.get(document.get("uid"), {})
@@ -718,10 +728,11 @@ def render_bundle(bundle, rows, counts, allow_empty=False):
             line_html.append("<tr>" + "".join("<td>" + escape(v) + "</td>" for v in values) + "<td>" + escape(when(line.get("wdate"))) + "</td><td>" + escape(when(line.get("backupdate"))) + "</td><td>" + signature + "</td></tr>")
         comments = related.get("approval_comment_info" if source == "active" else "approval_comment_info_backup", [])
         comment_html = "".join("<li><b>" + escape(members.get(r.get("uid"), {}).get("rname") or r.get("uid")) + " (" + escape(r.get("uid")) + ")</b> " + escape(r.get("wdate")) + (u" · 백업시각: " + escape(when(r.get("backupdate"))) if r.get("backupdate") else u"") + "<pre>" + escape(r.get("context")) + "</pre></li>" for r in comments)
-        links = "".join('<li><a href="../../' + escape(a["path"]) + '">' + escape(a["name"]) + "</a></li>" for a in attachments)
+        links = "".join('<li><a href="'+root_link + escape(a["path"]) + '">' + escape(a["name"]) + "</a></li>" for a in attachments)
         title = document.get("title") or u"제목 없음"
         page = u'''<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><title>%s</title><style>body{font:12px 'Malgun Gothic',sans-serif;margin:24px;overflow-wrap:anywhere}table{border-collapse:collapse;max-width:100%%}td,th{border:1px solid #bbb;padding:6px}img{max-width:100%%}pre{white-space:pre-wrap;font:inherit}.notice{background:#fff2cc;padding:12px} @media print{.navigation{display:none}}</style></head><body><p class="navigation"><a href="../../index.html">보관함 목록</a> · <a href="database.json">원본 DB 기록</a> · 브라우저 인쇄에서 PDF로 저장할 수 있습니다.</p><h1>%s</h1><p>문서번호: %s · 기안자: %s (%s) · 상태: %s · 자료: %s</p><p>기안: %s / 완료: %s</p><p class="notice">DB 자료로 재구성한 보관본입니다. 원래 인쇄 서식과 다를 수 있습니다. 이미지·첨부 미확보 및 수집 범위는 목록의 확인 사항을 보세요.</p><h2>저장된 결재선 기록</h2><p>과거 문서는 관련 결재선의 각 백업 시각을 함께 표시합니다. 문서 버전과 동일 시점인지 대조가 필요합니다.</p><table><tr><th>순서</th><th>구분</th><th>이름</th><th>ID</th><th>직급</th><th>부서</th><th>상태</th><th>대결 대상</th><th>일시</th><th>백업 기록 시각</th><th>서명</th></tr>%s</table><h2>본문</h2>%s<h2>의견</h2><ul>%s</ul><h2>첨부</h2><ul>%s</ul></body></html>''' % (escape(title), escape(title), escape(document.get("doc_id")), escape(author), escape(document.get("uid")), escape(document.get("progress")), escape(source), escape(when(document.get("wdate"))), escape(when(document.get("cdate"))), u"".join(line_html), context, comment_html, links)
-        page_path = bundle.write("documents/%s/document.html" % identity, page)
+        page=page.replace('href="../../index.html"','href="'+root_link+'index.html"')
+        page_path = bundle.write(directory+'/document.html', page)
         if not document.get("context"):
             bundle.issue("empty_document_body", identity)
         if source == "history":
@@ -802,6 +813,7 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
                     "coverage": [{"kind": "approval", "status": "personal_relations_only", "saved": len(items)}],
                     "warnings": warnings, "files": bundle.files,
                     "display_decoding": bundle.display_decoding}
+        manifest['document_layout']='bucket-sha256-1'
         bundle.write("issues.json", json.dumps(bundle.issues, ensure_ascii=False, indent=2))
         payload = json.dumps({"items": items, "manifest": manifest}, ensure_ascii=False)
         payload = payload.replace(u"<", u"\\u003c").replace(u">", u"\\u003e").replace(u"&", u"\\u0026")

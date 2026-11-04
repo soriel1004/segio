@@ -38,6 +38,7 @@ FAILURE_CODES = set(('db_config_invalid', 'db_config_unreadable', 'psql_unavaila
     'unsafe_job', 'cancelled', 'server_disk_full', 'server_file_too_large',
     'server_access_denied', 'server_file_missing', 'export_failed',
     'secure_random_unavailable', 'csrf_required', 'read_only', 'unexpected_parameter',
+    'server_directory_limit',
     'empty_selection', 'invalid_baseline', 'invalid_mail_since', 'invalid_approval_since',
     'job_storage_failed', 'export_process_unavailable',
     'export_already_running', 'export_busy', 'mail_path_unconfigured'))
@@ -50,6 +51,7 @@ def failure_details(exc, stage):
     number = getattr(exc, 'errno', None)
     if code not in FAILURE_CODES:
         code = {errno.ENOSPC: 'server_disk_full', errno.EFBIG: 'server_file_too_large',
+                errno.EMLINK: 'server_directory_limit',
                 errno.EACCES: 'server_access_denied', errno.EPERM: 'server_access_denied',
                 errno.ENOENT: 'server_file_missing'}.get(number, 'export_failed')
         if isinstance(exc, UnicodeError) and stage == 'database':

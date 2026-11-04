@@ -67,7 +67,7 @@ TOOLS = ('remote_ssh_export.py','live_export_worker.py','export_approval_db.py',
 
 
 def ssh_failure_message(code, diagnostic=None, phase=''):
-    codes={'export_failed','invalid_metadata','unsafe_job','invalid_identity','export_not_ready',
+    codes={'export_failed','invalid_metadata','unsafe_job','invalid_identity','export_not_ready','server_directory_limit',
         'server_disk_full','server_access_denied','server_file_missing','server_file_too_large',
         'mail_changed_retry','mail_unsafe_file','mail_unsafe_symlink','mail_path_unconfigured',
         'mail_path_missing_or_symlink','job_storage_failed','db_config_invalid','db_config_unreadable',
