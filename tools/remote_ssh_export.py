@@ -22,7 +22,7 @@ from live_export_worker import (read_json, write_json, check_user, mail_path, in
                                 fingerprint, file_identity, failure_details as worker_failure_details)
 
 PROTOCOL = 'segio-ssh-archive/1'
-REVISION = 'ssh-bounded-snapshot-4'
+REVISION = 'ssh-streamed-records-5'
 
 
 def memory_info():
@@ -216,7 +216,7 @@ def failure_details(exc, stage):
     functions = ('prepare', 'verify_sources', 'read_json', 'write_json', 'run_export',
                  'reference_file', 'hash_file', 'fingerprint', 'inventory',
                  'render_bundle', 'attachment', 'local_file', 'image', 'freeze',
-                 'query_database', 'psql_readonly', 'read_rows', 'iter_rows', 'iter_render_bundle', 'private_root', 'text')
+                 'query_database', 'psql_readonly', 'read_rows', 'iter_rows', 'iter_render_bundle', 'json_chunks', 'byte_chunks', 'write_chunks', 'format_chunks', 'private_root', 'text')
     trace = sys.exc_info()[2]
     while trace is not None:
         frame = trace.tb_frame
@@ -359,14 +359,17 @@ def prepare(root, apply_limits=False):
         budget.phase=phase
         if phase=='render':budget.document()
         current.update(phase=phase,records_done=done,records_total=total);pulse()
-    def write_file(relative,data):
+    def write_file(relative,chunks):
         # One sequential file avoids tens of thousands of ext3 inode/journal
         # updates. Windows writes each verified range to its normal final path.
         if spool[0] is None:spool[0]=open(spool_path,'wb')
         offset=spool[0].tell()
-        for start in range(0,len(data),1024*1024):
-            pulse();spool[0].write(data[start:start+1024*1024])
-        details={'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
+        digest=hashlib.sha256();size=0
+        for data in chunks:
+            if not isinstance(data,bytes):data=data.encode('utf-8')
+            for start in range(0,len(data),1024*1024):
+                pulse();block=data[start:start+1024*1024];spool[0].write(block);digest.update(block);size+=len(block)
+        details={'bytes':size,'sha256':digest.hexdigest()}
         references[relative]=dict(details,path=relative,source_hex=source_hex(spool_path),source_offset=offset)
         spooled.append(relative)
         return details

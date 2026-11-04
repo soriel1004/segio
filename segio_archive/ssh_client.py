@@ -103,7 +103,7 @@ def ssh_failure_message(code, diagnostic=None, phase=''):
     site=diagnostic.get('site')
     functions={'prepare','verify_sources','read_json','write_json','run_export','reference_file','hash_file',
                'fingerprint','inventory','render_bundle','attachment','local_file','image','freeze',
-               'query_database','psql_readonly','read_rows','iter_rows','iter_render_bundle','private_root','text'}
+               'query_database','psql_readonly','read_rows','iter_rows','iter_render_bundle','json_chunks','byte_chunks','write_chunks','format_chunks','private_root','text'}
     if isinstance(site,dict) and isinstance(site.get('function'),str) and site['function'] in functions and type(site.get('line')) is int and 0<site['line']<1000000:
         details.append(site['function']+':'+str(site['line']))
     if details:message+='\n진단: '+' · '.join(details)

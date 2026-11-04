@@ -267,8 +267,97 @@ class DiskGroup(object):
         self.table,self.field=table,field
 
     def get(self, value, default=None):
-        return [json.loads(row[0]) for row in self.table.db.execute(
-            'SELECT payload FROM '+quote_identifier(self.table.table)+' WHERE '+quote_identifier(self.field)+'=? ORDER BY seq',(value,))]
+        return DiskSelection(self.table,self.field,value)
+
+
+class DiskSelection(object):
+    def __init__(self, table, field, value, order='seq'):
+        self.table,self.field,self.value,self.order=table,field,value,order
+
+    def __iter__(self):
+        for payload, in self.table.db.execute('SELECT payload FROM '+quote_identifier(self.table.table)+
+                ' WHERE '+quote_identifier(self.field)+'=? ORDER BY '+self.order,(self.value,)):
+            yield json.loads(payload)
+
+    def ordered_lines(self):
+        return DiskSelection(self.table,self.field,self.value,'order_no,number_no,seq')
+
+
+class DiskLookup(object):
+    def __init__(self, table, field):
+        self.table,self.field=table,field
+
+    def get(self, value, default=None):
+        row=self.table.db.execute('SELECT payload FROM '+quote_identifier(self.table.table)+
+            ' WHERE '+quote_identifier(self.field)+'=? ORDER BY seq LIMIT 1',(value,)).fetchone()
+        return json.loads(row[0]) if row else default
+
+    def __contains__(self,value):
+        return self.table.db.execute('SELECT 1 FROM '+quote_identifier(self.table.table)+
+            ' WHERE '+quote_identifier(self.field)+'=? LIMIT 1',(value,)).fetchone() is not None
+
+
+def row_lookup(table,field):
+    return DiskLookup(table,field) if isinstance(table,DiskTable) else dict((row[field],row) for row in table)
+
+
+def text_chunks(value,limit=16384):
+    offset=0
+    while offset<len(value):
+        end=min(offset+limit,len(value))
+        if end<len(value) and 0xd800<=ord(value[end-1])<=0xdbff and 0xdc00<=ord(value[end])<=0xdfff:end+=1
+        yield value[offset:end]
+        offset=end
+
+
+def json_chunks(value):
+    """Stream every row and escape long strings in bounded pieces (Python 2.6)."""
+    if isinstance(value,dict):
+        yield '{'
+        for number,(key,item) in enumerate(value.items()):
+            if number:yield ','
+            yield json.dumps(key,ensure_ascii=True);yield ':'
+            for chunk in json_chunks(item):yield chunk
+        yield '}'
+    elif isinstance(value,(list,tuple,DiskTable,DiskSelection)):
+        yield '['
+        for number,item in enumerate(value):
+            if number:yield ','
+            for chunk in json_chunks(item):yield chunk
+        yield ']'
+    elif isinstance(value,(str,type(u''))):
+        yield '"'
+        for piece in text_chunks(value):
+            encoded=json.dumps(piece,ensure_ascii=False)[1:-1]
+            try:yield encoded.encode('utf-8')
+            except UnicodeError:yield json.dumps(piece,ensure_ascii=True)[1:-1]
+        yield '"'
+    else:yield json.dumps(value,ensure_ascii=True)
+
+
+def byte_chunks(chunks,limit=65536):
+    parts=[];size=0
+    for data in chunks:
+        if not isinstance(data,bytes):data=data.encode('utf-8')
+        if len(data)>=limit:
+            if parts:yield b''.join(parts);parts=[];size=0
+            for offset in range(0,len(data),limit):yield data[offset:offset+limit]
+        else:
+            if parts and size+len(data)>limit:yield b''.join(parts);parts=[];size=0
+            parts.append(data);size+=len(data)
+            if size>=limit:yield b''.join(parts);parts=[];size=0
+    if parts:yield b''.join(parts)
+
+
+def format_chunks(template,values):
+    parts=template.split('%s')
+    if len(parts)!=len(values)+1:raise SafeError('Document template mismatch.')
+    for number,value in enumerate(values):
+        yield parts[number].replace('%%','%')
+        if isinstance(value,(str,type(u''))):yield value
+        else:
+            for chunk in value:yield chunk
+    yield parts[-1].replace('%%','%')
 
 
 class DiskRows(dict):
@@ -421,15 +510,20 @@ def query_database(config, username, work, binary="/usr/bin/psql", live_scope=Fa
         try:
             for table in sorted(model):
                 quoted=quote_identifier(table)
-                rows.db.execute('CREATE TABLE '+quoted+' (seq INTEGER PRIMARY KEY,no TEXT,doc_no TEXT,p_no TEXT,payload TEXT)')
+                rows.db.execute('CREATE TABLE '+quoted+' (seq INTEGER PRIMARY KEY,no TEXT,doc_no TEXT,p_no TEXT,uid TEXT,order_no INTEGER,number_no INTEGER,payload TEXT)')
                 count=0
                 for number,row in enumerate(iter_rows(os.path.join(work,table+'.csv'))):
                     if checkpoint:checkpoint()
-                    rows.db.execute('INSERT INTO '+quoted+' VALUES (?,?,?,?,?)',(number,row.get('no'),row.get('doc_no'),row.get('p_no'),json.dumps(row,ensure_ascii=False)))
+                    line=table in ('approval_line','approval_line_backup')
+                    rows.db.execute('INSERT INTO '+quoted+' VALUES (?,?,?,?,?,?,?,?)',(number,row.get('no'),row.get('doc_no'),row.get('p_no'),row.get('uid'),int(row.get('order_no') or 0) if line else None,int(row['no']) if line else None,json.dumps(row,ensure_ascii=False)))
                     count+=1
                     if progress_detail:progress_detail('snapshot',count,expected[table])
-                for field in ('no','doc_no','p_no'):
+                for field in ('no','doc_no','p_no','uid'):
+                    if field not in model[table]:continue
+                    if field=='p_no' and table in ('approval_line','approval_line_backup'):continue
                     rows.db.execute('CREATE INDEX '+quote_identifier(table+'_'+field)+' ON '+quoted+' ('+field+')')
+                if table in ('approval_line','approval_line_backup'):
+                    rows.db.execute('CREATE INDEX '+quote_identifier(table+'_ordered_lines')+' ON '+quoted+' (p_no,order_no,number_no,seq)')
                 rows.db.commit();rows[table]=DiskTable(rows.db,table,count)
                 os.unlink(os.path.join(work,table+'.csv'))
         except BaseException:
@@ -531,24 +625,33 @@ class Bundle:
         self.display_decoding = {"urlencoded_html": 0, "escaped_html": 0, "base64_signature": 0}
 
     def issue(self, kind, value):
-        entry = {"kind": kind, "reference": text(value)}
+        reference=text(value)
+        if len(reference)>1024:
+            digest=hashlib.sha256()
+            for chunk in byte_chunks(text_chunks(reference)):digest.update(chunk)
+            reference='sha256:'+digest.hexdigest()
+        entry = {"kind": kind, "reference": reference}
         if entry not in self.issues:
             self.issues.append(entry)
 
     def write(self, path, data):
-        if not isinstance(data, bytes):data=data.encode('utf-8')
+        return self.write_chunks(path,(data,))
+
+    def write_chunks(self,path,chunks):
+        chunks=byte_chunks(chunks)
         if self.write_file is not None and path.startswith('documents/'):
-            self.files[path]=self.write_file(path,data)
+            self.files[path]=self.write_file(path,chunks)
             return path
         target = os.path.join(self.folder, path)
         parent = os.path.dirname(target)
         if not os.path.isdir(parent):
             os.makedirs(parent, 0o700)
-        if not isinstance(data, bytes):
-            data = data.encode("utf-8")
+        digest=hashlib.sha256();size=0
         with open(target, "wb") as stream:
-            stream.write(data)
-        self.files[path] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for data in chunks:
+                if not isinstance(data,bytes):data=data.encode('utf-8')
+                stream.write(data);digest.update(data);size+=len(data)
+        self.files[path] = {"bytes": size, "sha256": digest.hexdigest()}
         return path
 
     def local_file(self, reference, upload=False):
@@ -648,9 +751,10 @@ class Bundle:
                     pass
         if not result:
             self.issue("image_unresolved", src)
-        if len(self.image_cache)>=32 or sum(len(value or '') for value in self.image_cache.values())>8*1024*1024:
+        cost=len(src)+len(result or '')
+        if len(self.image_cache)>=32 or sum(len(key)+len(value or '') for key,value in self.image_cache.items())+cost>8*1024*1024:
             self.image_cache.clear()
-        if len(result or '')<=8*1024*1024:self.image_cache[src] = result
+        if cost<=8*1024*1024:self.image_cache[src] = result
         return result
 
     @staticmethod
@@ -666,6 +770,8 @@ class Bundle:
         if not re.match(r"^\.[A-Za-z0-9]{1,10}$", extension):
             extension = ".bin"
         relative = document_directory(document)+"/attachments/%s%s" % (row["no"], extension)
+        if relative in self.files:
+            return {"name":row['fname'],"path":relative,"bytes":self.files[relative]['bytes']}
         if self.reference_file is not None:
             # SSH records a verified source reference; no server-side copy.
             details = self.reference_file(path, relative)
@@ -744,7 +850,7 @@ def render_bundle(bundle, rows, counts, allow_empty=False):
 
 
 def iter_render_bundle(bundle, rows, counts, allow_empty=False, checkpoint=None, progress_detail=None):
-    members = dict((r["uid"], r) for r in rows["approval_member_info"])
+    members = row_lookup(rows["approval_member_info"],"uid")
     bundle.profiles = members
     if not allow_empty and not rows["approval_document"] and not rows["approval_document_backup"] and bundle.username not in members:
         raise SafeError("Target user and related documents not found; archive not completed.", "approval_user_not_found")
@@ -757,11 +863,10 @@ def iter_render_bundle(bundle, rows, counts, allow_empty=False, checkpoint=None,
     def versions():
         for document in rows['approval_document']:yield document,'active',document['no']
         for document in rows['approval_document_backup']:yield document,'history',document['no']+'-history-'+document['id']
-    existing=set(document['no'] for document in rows['approval_document'])
-    backups=set(document['no'] for document in rows['approval_document_backup'])
-    bundle.attachments_by_no = dict((r["no"], r) for r in rows["approval_attach_info"])
-    formats = dict((r["no"], r) for r in rows["approval_format_info"])
-    attachment_cache = {}
+    existing=row_lookup(rows['approval_document'],'no')
+    backups=row_lookup(rows['approval_document_backup'],'no')
+    bundle.attachments_by_no = row_lookup(rows["approval_attach_info"],"no")
+    formats = row_lookup(rows["approval_format_info"],"no")
     for number,(document, source, identity) in enumerate(versions(),1):
         if checkpoint:checkpoint()
         if progress_detail:progress_detail('render',number,counts['approval_document']+counts['approval_document_backup'])
@@ -773,38 +878,39 @@ def iter_render_bundle(bundle, rows, counts, allow_empty=False, checkpoint=None,
             for record in records:
                 if record.get("doc_no") is not None and text(record["doc_no"]) != no:
                     raise SafeError("Related document mismatch.")
-        if no not in attachment_cache:
-            attachment_cache[no] = [a for a in [bundle.attachment(r, no) for r in related.get("approval_attach_info", [])] if a]
-        attachments = attachment_cache[no]
+        attachments = [a for a in [bundle.attachment(r, no) for r in related.get("approval_attach_info", [])] if a]
         raw = {"source": source, "document": document, "related": related,
                "format": formats.get(document.get("fno")),
                "value_format": "Database text values; JSON null preserves SQL NULL"}
         directory=document_directory(identity)
         root_link='../'*len(directory.split('/'))
         raw_path = directory+'/database.json'
-        bundle.write(raw_path, json.dumps(raw, ensure_ascii=False, indent=2))
+        bundle.write_chunks(raw_path,json_chunks(raw))
         context, search = bundle.freeze(document.get("context"))
         profile = members.get(document.get("uid"), {})
         lines = related.get("approval_line" if source == "active" else "approval_line_backup", [])
-        lines = sorted(lines, key=lambda r: (int(r.get("order_no") or 0), int(r["no"])))
+        lines = lines.ordered_lines() if isinstance(lines,DiskSelection) else sorted(lines, key=lambda r: (int(r.get("order_no") or 0), int(r["no"])))
         author = next((r.get("rname") for r in lines if r.get("uid") == document.get("uid") and r.get("rname")), None) or profile.get("rname") or document.get("uid")
         if source == "history":
             # Keep all timestamped line rows below, without claiming a join
             # between independently archived versions that we cannot prove.
             author = (text(profile["rname"]) + u" [추출 시점 회원명]" if profile.get("rname") else document.get("uid"))
-        line_html, line_text = [], []
-        for line in lines:
-            signature, signature_text = bundle.freeze(line.get("sign"), signature=True)
-            values = [line.get(k) for k in ("order_no", "division", "rname", "uid", "class", "gname", "state", "target_id")]
-            line_text.extend([text(v) for v in values])
-            line_html.append("<tr>" + "".join("<td>" + escape(v) + "</td>" for v in values) + "<td>" + escape(when(line.get("wdate"))) + "</td><td>" + escape(when(line.get("backupdate"))) + "</td><td>" + signature + "</td></tr>")
+        line_text = []
+        def line_chunks():
+            for line in lines:
+                signature, signature_text = bundle.freeze(line.get("sign"), signature=True)
+                values = [line.get(k) for k in ("order_no", "division", "rname", "uid", "class", "gname", "state", "target_id")]
+                line_text.extend([text(v) for v in values])
+                yield "<tr>" + "".join("<td>" + escape(v) + "</td>" for v in values) + "<td>" + escape(when(line.get("wdate"))) + "</td><td>" + escape(when(line.get("backupdate"))) + "</td><td>" + signature + "</td></tr>"
         comments = related.get("approval_comment_info" if source == "active" else "approval_comment_info_backup", [])
-        comment_html = "".join("<li><b>" + escape(members.get(r.get("uid"), {}).get("rname") or r.get("uid")) + " (" + escape(r.get("uid")) + ")</b> " + escape(r.get("wdate")) + (u" · 백업시각: " + escape(when(r.get("backupdate"))) if r.get("backupdate") else u"") + "<pre>" + escape(r.get("context")) + "</pre></li>" for r in comments)
+        def comment_chunks():
+            for r in comments:yield "<li><b>" + escape(members.get(r.get("uid"), {}).get("rname") or r.get("uid")) + " (" + escape(r.get("uid")) + ")</b> " + escape(r.get("wdate")) + (u" · 백업시각: " + escape(when(r.get("backupdate"))) if r.get("backupdate") else u"") + "<pre>" + escape(r.get("context")) + "</pre></li>"
         links = "".join('<li><a href="'+root_link + escape(a["path"]) + '">' + escape(a["name"]) + "</a></li>" for a in attachments)
         title = document.get("title") or u"제목 없음"
-        page = u'''<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><title>%s</title><style>body{font:12px 'Malgun Gothic',sans-serif;margin:24px;overflow-wrap:anywhere}table{border-collapse:collapse;max-width:100%%}td,th{border:1px solid #bbb;padding:6px}img{max-width:100%%}pre{white-space:pre-wrap;font:inherit}.notice{background:#fff2cc;padding:12px} @media print{.navigation{display:none}}</style></head><body><p class="navigation"><a href="../../index.html">보관함 목록</a> · <a href="database.json">원본 DB 기록</a> · 브라우저 인쇄에서 PDF로 저장할 수 있습니다.</p><h1>%s</h1><p>문서번호: %s · 기안자: %s (%s) · 상태: %s · 자료: %s</p><p>기안: %s / 완료: %s</p><p class="notice">DB 자료로 재구성한 보관본입니다. 원래 인쇄 서식과 다를 수 있습니다. 이미지·첨부 미확보 및 수집 범위는 목록의 확인 사항을 보세요.</p><h2>저장된 결재선 기록</h2><p>과거 문서는 관련 결재선의 각 백업 시각을 함께 표시합니다. 문서 버전과 동일 시점인지 대조가 필요합니다.</p><table><tr><th>순서</th><th>구분</th><th>이름</th><th>ID</th><th>직급</th><th>부서</th><th>상태</th><th>대결 대상</th><th>일시</th><th>백업 기록 시각</th><th>서명</th></tr>%s</table><h2>본문</h2>%s<h2>의견</h2><ul>%s</ul><h2>첨부</h2><ul>%s</ul></body></html>''' % (escape(title), escape(title), escape(document.get("doc_id")), escape(author), escape(document.get("uid")), escape(document.get("progress")), escape(source), escape(when(document.get("wdate"))), escape(when(document.get("cdate"))), u"".join(line_html), context, comment_html, links)
-        page=page.replace('href="../../index.html"','href="'+root_link+'index.html"')
-        page_path = bundle.write(directory+'/document.html', page)
+        template = u'''<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><title>%s</title><style>body{font:12px 'Malgun Gothic',sans-serif;margin:24px;overflow-wrap:anywhere}table{border-collapse:collapse;max-width:100%%}td,th{border:1px solid #bbb;padding:6px}img{max-width:100%%}pre{white-space:pre-wrap;font:inherit}.notice{background:#fff2cc;padding:12px} @media print{.navigation{display:none}}</style></head><body><p class="navigation"><a href="../../index.html">보관함 목록</a> · <a href="database.json">원본 DB 기록</a> · 브라우저 인쇄에서 PDF로 저장할 수 있습니다.</p><h1>%s</h1><p>문서번호: %s · 기안자: %s (%s) · 상태: %s · 자료: %s</p><p>기안: %s / 완료: %s</p><p class="notice">DB 자료로 재구성한 보관본입니다. 원래 인쇄 서식과 다를 수 있습니다. 이미지·첨부 미확보 및 수집 범위는 목록의 확인 사항을 보세요.</p><h2>저장된 결재선 기록</h2><p>과거 문서는 관련 결재선의 각 백업 시각을 함께 표시합니다. 문서 버전과 동일 시점인지 대조가 필요합니다.</p><table><tr><th>순서</th><th>구분</th><th>이름</th><th>ID</th><th>직급</th><th>부서</th><th>상태</th><th>대결 대상</th><th>일시</th><th>백업 기록 시각</th><th>서명</th></tr>%s</table><h2>본문</h2>%s<h2>의견</h2><ul>%s</ul><h2>첨부</h2><ul>%s</ul></body></html>'''
+        values = (escape(title), escape(title), escape(document.get("doc_id")), escape(author), escape(document.get("uid")), escape(document.get("progress")), escape(source), escape(when(document.get("wdate"))), escape(when(document.get("cdate"))), line_chunks(), context, comment_chunks(), links)
+        template=template.replace('href="../../index.html"','href="'+root_link+'index.html"')
+        page_path = bundle.write_chunks(directory+'/document.html',format_chunks(template,values))
         if not document.get("context"):
             bundle.issue("empty_document_body", identity)
         if source == "history":
@@ -815,7 +921,7 @@ def iter_render_bundle(bundle, rows, counts, allow_empty=False, checkpoint=None,
         yield {"id": identity, "title": title, "path": page_path, "json": raw_path,
                       "source": source, "attachments": attachments,
                       "search": u" ".join([search, text(author), text(document.get("doc_id")), text(document.get("uid"))] + line_text + [text(r.get("context")) for r in comments])}
-    bundle.write("metadata/members.json", json.dumps(list(rows["approval_member_info"]), ensure_ascii=False, indent=2))
+    bundle.write_chunks("metadata/members.json",json_chunks(rows["approval_member_info"]))
 
 
 def reserve_archive_path(output, username):

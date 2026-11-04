@@ -18,6 +18,24 @@ import export_approval_db as exporter
 
 
 class DBExportTests(unittest.TestCase):
+    def test_large_related_records_and_history_render_under_128_mib_limit(self):
+        runtimes=[sys.executable]
+        if os.environ.get('SEGIO_TEST_PYTHON26'):runtimes.append(os.environ['SEGIO_TEST_PYTHON26'])
+        for executable in runtimes:
+            with self.subTest(runtime=executable),tempfile.TemporaryDirectory() as tmp:
+                result=subprocess.run([executable,str(Path(__file__).parent/'large_approval_fixture.py'),tmp],
+                                      capture_output=True,text=True,timeout=120)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertTrue(json.loads(result.stdout)['ok'])
+
+    def test_streamed_json_preserves_utf8_controls_null_and_unicode_chunk_boundaries(self):
+        value={'body':'한글'+('x'*16380)+'\U0001f600\n"\\끝','empty':'','null':None}
+        chunks=list(exporter.byte_chunks(exporter.json_chunks(value)))
+        data=b''.join(chunks)
+        self.assertEqual(json.loads(data.decode('utf-8')),value)
+        self.assertIn('한글'.encode(),data)
+        self.assertTrue(all(len(chunk)<=65536 for chunk in chunks))
+
     def test_disk_snapshot_does_not_materialize_all_document_bodies(self):
         import tracemalloc
         model=json.loads((Path(exporter.HERE)/'approval_db_columns.json').read_text())
