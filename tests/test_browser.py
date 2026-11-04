@@ -131,7 +131,7 @@ class WindowsStartupTests(unittest.TestCase):
                 self.assertEqual(app.ssh_host.get(),'192.168.0.100')
                 self.assertEqual(app.ssh_port.get(),'22')
                 self.assertEqual(app.ssh_user.get(),'root')
-                self.assertTrue(app.resume.get())
+                self.assertFalse(app.resume.get())
                 self.assertFalse(app.make_zip.get())
                 self.assertTrue(app.approvals.get())
                 self.assertTrue(app.mail.get())
