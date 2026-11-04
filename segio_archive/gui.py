@@ -36,7 +36,7 @@ class App(tk.Tk):
         self.ssh_password = tk.StringVar()
         self.ssh_key = tk.StringVar()
         self.ssh_work = tk.StringVar(value='/backup')
-        self.resume = tk.BooleanVar(value=True)
+        self.resume = tk.BooleanVar(value=False)
         self.make_zip = tk.BooleanVar(value=False)
         self.folder = tk.StringVar(value=str(Path.home() / "Documents" / "SEGIO보관함"))
         self.approvals = tk.BooleanVar(value=True)
