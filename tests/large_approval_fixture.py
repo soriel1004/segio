@@ -13,6 +13,7 @@ import remote_ssh_export as helper
 
 
 def main(root):
+    root=os.path.realpath(root)
     cell=os.path.join(root,'cell');os.makedirs(os.path.join(cell,'data'))
     job=os.path.join(root,'.segio-ssh-'+'f'*32);os.mkdir(job,0o700)
     with open(os.path.join(exporter.HERE,'approval_db_columns.json'),'rb') as stream:

@@ -12,6 +12,8 @@ SQLite 관련 행을 재순회 가능한 디스크 뷰로 바꾸고 순서/문�
 
 로컬 전체 184개는 실패·오류 0개, GUI/관리형 브라우저 file URL 정책 12개 건너뜀으로 종료했습니다. 처음 실행은 새 세션의 로컬 소켓 권한이 없어 실패했고 필요한 접근 권한을 받은 뒤 재실행했습니다. 실제 PostgreSQL 16.2 및 실제 Python 2.6.9에서도 전체 SSH 준비/검증과 직원 범위·NULL/Unicode·현재/과거 기록·첨부·검색 시험이 통과했습니다. 이후 Unicode 조각 공통 함수 보완은 관련 DB 검사로 재확인하며 GitHub의 전체 Linux/Windows 검사에서 검증합니다.
 
+[Actions #74](https://github.com/soriel1004/segio/actions/runs/41926881743)에서는 Linux 검사가 통과했으나 Windows 회귀 시험의 임시 루트가 8.3 짧은 경로로 전달되어 private_root의 정식 경로 대조에 걸렸습니다. 배포 도구의 경로 안전성 검사는 유지하고 합성 시험의 루트만 realpath로 정규화했습니다. Linux에서도 별칭 경로로 같은 전체 시험을 실행하여 정식 경로 변환을 함께 검사합니다.
+
 ## v0.4.22 서버 추출 부하·대량 삭제 선택 개선
 
 운영 사진은 약 39분간 database 단계 뒤 SSH_CONNECTION_OR_IO이며 콘솔까지 응답하지 않아 강제 재부팅했다고 보고받았습니다. 재부팅 후 7,780 MiB RAM 중 free 6,400 MiB, swap 0, /backup 가용 575 GiB, vmstat wa 23~27%, 제시한 messages에는 OOM/디스크 오류 기록이 없었습니다. 추가 확인에서 /backup은 ext3이고 SMART 전체 상태 PASSED, 제시한 dmesg에는 장치 오류/리셋 기록이 없었습니다. 당시 원인을 메모리나 장치 오류로 확정하지 않습니다.

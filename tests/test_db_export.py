@@ -23,7 +23,10 @@ class DBExportTests(unittest.TestCase):
         if os.environ.get('SEGIO_TEST_PYTHON26'):runtimes.append(os.environ['SEGIO_TEST_PYTHON26'])
         for executable in runtimes:
             with self.subTest(runtime=executable),tempfile.TemporaryDirectory() as tmp:
-                result=subprocess.run([executable,str(Path(__file__).parent/'large_approval_fixture.py'),tmp],
+                target=Path(tmp)
+                if os.name=='posix':
+                    actual=target/'real';actual.mkdir();alias=target/'alias';alias.symlink_to(actual,target_is_directory=True);target=alias
+                result=subprocess.run([executable,str(Path(__file__).parent/'large_approval_fixture.py'),str(target)],
                                       capture_output=True,text=True,timeout=120)
                 self.assertEqual(result.returncode,0,result.stderr)
                 self.assertTrue(json.loads(result.stdout)['ok'])
