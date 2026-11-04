@@ -16,6 +16,8 @@ SSH snapshot을 disk-backed SQLite로 전환하고 순차 문서 변환·catalog
 
 [Actions #72](https://github.com/soriel1004/segio/actions/runs/41800071914)에서는 Linux 검사가 2분 51초에 완료됐으나 Windows의 SSH 시험 어댑터가 prepare 함수 복제 시 새 기본 인자를 잃어 작업이 queued 상태로 대기했습니다. 실제 배포 helper의 오류가 아니라 시험 스레드가 함수 진입 전에 TypeError로 끝난 문제입니다. 복제할 때 __defaults__를 전달하도록 고치고, 같은 어댑터 복제를 Linux에서도 실행하여 이 경로를 검사합니다. 시험 worker 진입 실패는 상태 오류로 즉시 전환해 CI의 장시간 대기를 방지합니다.
 
+시험 어댑터 보완 후 관련 SSH 20개·증분 백업 11개가 로컬에서 통과했습니다. 이전 #72는 Windows job의 20분 제한으로 취소됐으며 배포 파일을 생성하지 않았습니다. 최종 [Actions #73](https://github.com/soriel1004/segio/actions/runs/41802112133) (`754f03e`)에서 Linux·Windows 전체 검사, Windows EXE 파일/제품 버전 확인·빌드·업로드가 모두 성공했습니다. Windows v0.4.22 아티팩트 ID `13308905420`, 표시 373 MB, SHA-256 `5cade4bfdc9f610fc296757e8fc501526eb0af2287b1a89d937b465d6ed45d1b`입니다. 서버 재설치는 필요 없으며 기존 큰 백업은 새 프로그램의 보관함 열기에서 한 번 갱신합니다. 운영 서버의 중단 원인이나 수정본의 현장 부하 결과까지 확인한 것은 아닙니다.
+
 ## v0.4.21 EMLINK 문서 디렉터리 분산
 
 사진의 errno=31은 EMLINK이며 render_bundle의 문서별 raw JSON 저장 시 디렉터리 생성에서 발생합니다. 문서/과거 기록의 전체 ID SHA-256 첫 2자리로 documents/b-xx/ID 경로를 만들고, 첨부와 목록 복귀 링크를 갱신했습니다. 옛 경로·새 경로의 native/browser 삭제 검증을 지원하고 증분 병합에서 이동한 문서의 옛 본문을 제거하며 공유 참조는 보호합니다. 디렉터리 정리는 전체 파일을 한 번 조사하여 수행합니다.
