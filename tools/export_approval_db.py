@@ -18,6 +18,10 @@ import json
 import os
 import re
 import shutil
+try:
+    import sqlite3
+except ImportError:
+    sqlite3=None
 import stat
 import subprocess
 import sys
@@ -223,8 +227,11 @@ def copy_command(query, name, columns, selection=None):
 
 
 def read_rows(path):
+    return list(iter_rows(path))
+
+
+def iter_rows(path):
     csv.field_size_limit(256 * 1024 * 1024)
-    result = []
     stream = open(path, "rb") if PY2 else io.open(path, "r", encoding="ascii", newline="")
     try:
         for row in csv.DictReader(stream):
@@ -233,10 +240,40 @@ def read_rows(path):
             decoded = {}
             for key, value in row.items():
                 decoded[text(key)] = None if text(value) == NULL else binascii.unhexlify(value).decode("utf-8")
-            result.append(decoded)
+            yield decoded
     finally:
         stream.close()
-    return result
+
+
+class DiskTable(object):
+    def __init__(self, db, table, count):
+        self.db, self.table, self.count = db, table, count
+
+    def __len__(self):
+        return self.count
+
+    def __iter__(self):
+        for payload, in self.db.execute('SELECT payload FROM '+quote_identifier(self.table)+' ORDER BY seq'):
+            yield json.loads(payload)
+
+    def __getitem__(self, number):
+        row=self.db.execute('SELECT payload FROM '+quote_identifier(self.table)+' WHERE seq=?',(number,)).fetchone()
+        if row is None:raise IndexError(number)
+        return json.loads(row[0])
+
+
+class DiskGroup(object):
+    def __init__(self, table, field):
+        self.table,self.field=table,field
+
+    def get(self, value, default=None):
+        return [json.loads(row[0]) for row in self.table.db.execute(
+            'SELECT payload FROM '+quote_identifier(self.table.table)+' WHERE '+quote_identifier(self.field)+'=? ORDER BY seq',(value,))]
+
+
+class DiskRows(dict):
+    def close(self):
+        self.db.close()
 
 
 def database_sqlstates(error):
@@ -340,7 +377,7 @@ def psql_readonly(config, work, sql, binary="/usr/bin/psql", checkpoint=None):
             if key.startswith("PG"):
                 del env[key]
         env.update({"PGPASSFILE": passfile, "PGCONNECT_TIMEOUT": "5", "LC_ALL": "C",
-                    "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=%d" % DB_QUERY_TIMEOUT_MS})
+                    "PGOPTIONS": "-c default_transaction_read_only=on -c work_mem=1024 -c statement_timeout=%d" % DB_QUERY_TIMEOUT_MS})
         command = [binary, "-X", "-q", "-w", "-h", host, "-p", "5432", "-U", user,
                    "-d", database, "-v", "ON_ERROR_STOP=1"]
         try:
@@ -360,7 +397,9 @@ def psql_readonly(config, work, sql, binary="/usr/bin/psql", checkpoint=None):
             os.unlink(passfile)
 
 
-def query_database(config, username, work, binary="/usr/bin/psql", live_scope=False, checkpoint=None, approval_since=None):
+def query_database(config, username, work, binary="/usr/bin/psql", live_scope=False, checkpoint=None, approval_since=None, disk_backed=False, progress_detail=None):
+    if disk_backed and sqlite3 is None:
+        raise SafeError('Disk-backed export requires the standard Python sqlite3 module.','server_sqlite_unavailable')
     with open(os.path.join(HERE, "approval_db_columns.json"), "rb") as stream:
         model = json.loads(stream.read().decode("utf-8"))
     selection,_=selection_sql(username,live_scope,approval_since)
@@ -375,8 +414,30 @@ def query_database(config, username, work, binary="/usr/bin/psql", live_scope=Fa
     sql.extend(["ROLLBACK;", "\\echo SEGIO_DB_EXPORT_COMPLETE"])
     psql_readonly(config, work, sql, binary,checkpoint)
     expected = dict((r["table_name"], int(r["row_count"])) for r in read_rows(os.path.join(work, "counts.csv")))
-    rows = dict((table, read_rows(os.path.join(work, table + ".csv"))) for table in model)
+    if disk_backed:
+        rows=DiskRows();rows.db=sqlite3.connect(os.path.join(work,'snapshot.sqlite3'))
+        rows.db.execute('PRAGMA cache_size=1024');rows.db.execute('PRAGMA temp_store=FILE')
+        rows.db.execute('PRAGMA journal_mode=OFF')
+        try:
+            for table in sorted(model):
+                quoted=quote_identifier(table)
+                rows.db.execute('CREATE TABLE '+quoted+' (seq INTEGER PRIMARY KEY,no TEXT,doc_no TEXT,p_no TEXT,payload TEXT)')
+                count=0
+                for number,row in enumerate(iter_rows(os.path.join(work,table+'.csv'))):
+                    if checkpoint:checkpoint()
+                    rows.db.execute('INSERT INTO '+quoted+' VALUES (?,?,?,?,?)',(number,row.get('no'),row.get('doc_no'),row.get('p_no'),json.dumps(row,ensure_ascii=False)))
+                    count+=1
+                    if progress_detail:progress_detail('snapshot',count,expected[table])
+                for field in ('no','doc_no','p_no'):
+                    rows.db.execute('CREATE INDEX '+quote_identifier(table+'_'+field)+' ON '+quoted+' ('+field+')')
+                rows.db.commit();rows[table]=DiskTable(rows.db,table,count)
+                os.unlink(os.path.join(work,table+'.csv'))
+        except BaseException:
+            rows.close();raise
+    else:
+        rows = dict((table, read_rows(os.path.join(work, table + ".csv"))) for table in model)
     if set(expected) != set(rows) or any(len(rows[t]) != expected[t] for t in rows):
+        if isinstance(rows,DiskRows):rows.close()
         raise SafeError("Snapshot row count mismatch; archive not completed.", "db_snapshot_mismatch")
     return rows, expected
 
@@ -461,11 +522,12 @@ class FrozenHTML(HTMLParser):
 
 
 class Bundle:
-    def __init__(self, folder, cell, username, reference_file=None):
+    def __init__(self, folder, cell, username, reference_file=None, write_file=None):
         self.folder, self.cell, self.username = folder, os.path.realpath(cell), username
         self.files, self.issues, self.image_cache, self.attachments_by_no = {}, [], {}, {}
         self.profiles = {}
         self.reference_file = reference_file
+        self.write_file = write_file
         self.display_decoding = {"urlencoded_html": 0, "escaped_html": 0, "base64_signature": 0}
 
     def issue(self, kind, value):
@@ -474,6 +536,10 @@ class Bundle:
             self.issues.append(entry)
 
     def write(self, path, data):
+        if not isinstance(data, bytes):data=data.encode('utf-8')
+        if self.write_file is not None and path.startswith('documents/'):
+            self.files[path]=self.write_file(path,data)
+            return path
         target = os.path.join(self.folder, path)
         parent = os.path.dirname(target)
         if not os.path.isdir(parent):
@@ -582,7 +648,9 @@ class Bundle:
                     pass
         if not result:
             self.issue("image_unresolved", src)
-        self.image_cache[src] = result
+        if len(self.image_cache)>=32 or sum(len(value or '') for value in self.image_cache.values())>8*1024*1024:
+            self.image_cache.clear()
+        if len(result or '')<=8*1024*1024:self.image_cache[src] = result
         return result
 
     @staticmethod
@@ -655,6 +723,7 @@ class Bundle:
 
 
 def group_rows(rows, field):
+    if isinstance(rows,DiskTable):return DiskGroup(rows,field)
     result = {}
     for row in rows:
         result.setdefault(text(row[field]), []).append(row)
@@ -671,6 +740,10 @@ def when(value):
 
 
 def render_bundle(bundle, rows, counts, allow_empty=False):
+    return list(iter_render_bundle(bundle,rows,counts,allow_empty))
+
+
+def iter_render_bundle(bundle, rows, counts, allow_empty=False, checkpoint=None, progress_detail=None):
     members = dict((r["uid"], r) for r in rows["approval_member_info"])
     bundle.profiles = members
     if not allow_empty and not rows["approval_document"] and not rows["approval_document_backup"] and bundle.username not in members:
@@ -680,19 +753,18 @@ def render_bundle(bundle, rows, counts, allow_empty=False):
         field = "p_no" if table in ("approval_line", "approval_line_backup", "approval_doc_backup", "approval_doc_backup_backup") else "doc_no"
         if rows[table] and field in rows[table][0]:
             grouped[table] = group_rows(rows[table], field)
-    documents = list(rows["approval_document"])
-    backups = group_rows(rows["approval_document_backup"], "no")
-    existing = set(d["no"] for d in documents)
     # Each historical version gets its own page, even if no active row remains.
-    versions = [(d, "active", d["no"]) for d in documents]
-    for no in sorted(backups):
-        for document in backups[no]:
-            versions.append((document, "history", no + "-history-" + document["id"]))
+    def versions():
+        for document in rows['approval_document']:yield document,'active',document['no']
+        for document in rows['approval_document_backup']:yield document,'history',document['no']+'-history-'+document['id']
+    existing=set(document['no'] for document in rows['approval_document'])
+    backups=set(document['no'] for document in rows['approval_document_backup'])
     bundle.attachments_by_no = dict((r["no"], r) for r in rows["approval_attach_info"])
     formats = dict((r["no"], r) for r in rows["approval_format_info"])
-    index = []
     attachment_cache = {}
-    for document, source, identity in versions:
+    for number,(document, source, identity) in enumerate(versions(),1):
+        if checkpoint:checkpoint()
+        if progress_detail:progress_detail('render',number,counts['approval_document']+counts['approval_document_backup'])
         no = document["no"]
         if not re.match(r"^\d+(?:-history-\d+)?$", identity):
             raise SafeError("Unexpected document key; archive not completed.")
@@ -740,11 +812,10 @@ def render_bundle(bundle, rows, counts, allow_empty=False):
         for ref in tokens(document.get("link")) + tokens(document.get("orig_doc_no")):
             if ref and ref not in existing and ref not in backups:
                 bundle.issue("linked_document_outside_scope", ref)
-        index.append({"id": identity, "title": title, "path": page_path, "json": raw_path,
+        yield {"id": identity, "title": title, "path": page_path, "json": raw_path,
                       "source": source, "attachments": attachments,
-                      "search": u" ".join([search, text(author), text(document.get("doc_id")), text(document.get("uid"))] + line_text + [text(r.get("context")) for r in comments])})
-    bundle.write("metadata/members.json", json.dumps(rows["approval_member_info"], ensure_ascii=False, indent=2))
-    return index
+                      "search": u" ".join([search, text(author), text(document.get("doc_id")), text(document.get("uid"))] + line_text + [text(r.get("context")) for r in comments])}
+    bundle.write("metadata/members.json", json.dumps(list(rows["approval_member_info"]), ensure_ascii=False, indent=2))
 
 
 def reserve_archive_path(output, username):
@@ -763,9 +834,11 @@ def reserve_archive_path(output, username):
         return path
 
 
-def run_export(config, username, output, cell=None, binary="/usr/bin/psql", progress=None, live_scope=False, pack=True, checkpoint=None, approval_since=None, reference_file=None):
+def run_export(config, username, output, cell=None, binary="/usr/bin/psql", progress=None, live_scope=False, pack=True, checkpoint=None, approval_since=None, reference_file=None, progress_detail=None, write_file=None):
     if reference_file is not None and pack:
         raise SafeError("Direct source references require an unpacked SSH export.")
+    if write_file is not None and (pack or reference_file is None):
+        raise SafeError('Ranged output requires an unpacked SSH export.')
     notify = progress or (lambda message: None)
     approval_since = approval_cutoff(approval_since)
     if not re.match(r"^[A-Za-z0-9_.@-]{1,100}$", username):
@@ -778,19 +851,38 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
     work = os.path.join(folder, "private-query")
     os.mkdir(work, 0o700)
     archive_path = None
+    rows=None
     success = False
     try:
         notify("Reading approval records in one read-only DB snapshot...")
-        rows, counts = query_database(config, username, work, binary, live_scope,checkpoint,approval_since=approval_since)
+        direct=reference_file is not None
+        rows, counts = query_database(config, username, work, binary, live_scope,checkpoint,approval_since=approval_since,disk_backed=direct,progress_detail=progress_detail)
         notify("Snapshot checked: %d active documents, %d historical versions." %
                (counts["approval_document"], counts["approval_document_backup"]))
-        shutil.rmtree(work)
-        bundle = Bundle(folder, cell, username, reference_file)
+        if not direct:shutil.rmtree(work)
+        bundle = Bundle(folder, cell, username, reference_file,write_file)
         notify("Copying attachments and building offline HTML...")
         # The live bridge already authenticated the employee. An employee with
         # no approval profile/documents must still be able to archive mail.
-        items = render_bundle(bundle, rows, counts, allow_empty=live_scope)
-        bundle.write("catalog.json", json.dumps({"items": items}, ensure_ascii=False))
+        if direct:
+            item_count=0
+            with open(os.path.join(folder,'catalog.json'),'wb') as stream:
+                digest=hashlib.sha256();size=0
+                def emit(payload):
+                    stream.write(payload);digest.update(payload)
+                    return len(payload)
+                size+=emit(b'{"items":[')
+                for item in iter_render_bundle(bundle,rows,counts,live_scope,checkpoint,progress_detail):
+                    if item_count:size+=emit(b',')
+                    size+=emit(json.dumps(item,ensure_ascii=False).encode('utf-8'));item_count+=1
+                size+=emit(b']}')
+            bundle.files['catalog.json']={'bytes':size,'sha256':digest.hexdigest()}
+            if isinstance(rows,DiskRows):rows.close()
+            rows=None;shutil.rmtree(work)
+        else:
+            items = render_bundle(bundle, rows, counts, allow_empty=live_scope)
+            item_count=len(items)
+            bundle.write("catalog.json", json.dumps({"items": items}, ensure_ascii=False))
         warnings = [u"계정 삭제 영향은 검증되지 않았습니다.",
                     u"개인 ID로 확인된 기안·결재·대결·참조·자동회람·개인 수신·댓글·즐겨찾기 및 관련 이력을 수집했습니다. 부서 공용 수신함·기타 권한으로 열리는 문서는 범위가 확인되지 않았습니다.",
                     u"DB는 한 읽기 전용 스냅샷으로 조회했습니다. 서버 파일은 이후 복사하므로 DB와 파일의 동일 시점을 보장하지 않습니다.",
@@ -804,18 +896,18 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
             warnings[3] = u"approval_ext_info/report/work 계열의 별도 업무·확장 기록은 이번 DB 수집 범위에 포함하지 않았습니다. 메일 선택 결과는 manifest.json의 mail 항목을 확인하세요."
         if approval_since is not None:
             warnings.append(u'추가 결재는 마지막 결재 백업 기준 시각 이후 기안한 문서만 포함합니다. 이전 기안 문서의 상태·본문·첨부 변경과 기안일 미확인 문서는 다시 추출하지 않습니다.')
-        if not items and approval_since is None:
+        if not item_count and approval_since is None:
             warnings.append(u"개인 관계로 확인된 문서가 0개입니다. 실제 결재함과 대조하기 전에는 자료가 없다고 판단할 수 없습니다.")
         manifest = {"format": "segio-db-html/1", "server": "cell_000", "user": username,
                     "state": "collected_with_warnings", "account_deletion_verified": False,
                     "finished_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "counts": {"approval": len(items)}, "snapshot_rows": counts,
-                    "coverage": [{"kind": "approval", "status": "personal_relations_only", "saved": len(items)}],
+                    "counts": {"approval": item_count}, "snapshot_rows": counts,
+                    "coverage": [{"kind": "approval", "status": "personal_relations_only", "saved": item_count}],
                     "warnings": warnings, "files": bundle.files,
                     "display_decoding": bundle.display_decoding}
         manifest['document_layout']='bucket-sha256-1'
         bundle.write("issues.json", json.dumps(bundle.issues, ensure_ascii=False, indent=2))
-        payload = json.dumps({"items": items, "manifest": manifest}, ensure_ascii=False)
+        payload = json.dumps({"items": [] if direct else items, "manifest": manifest}, ensure_ascii=False)
         payload = payload.replace(u"<", u"\\u003c").replace(u">", u"\\u003e").replace(u"&", u"\\u0026")
         with open(os.path.join(HERE, "db_archive_index.html"), "rb") as stream:
             template = stream.read().decode("utf-8")
@@ -853,6 +945,7 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
         success = True
         return folder, archive_path
     finally:
+        if isinstance(rows,DiskRows):rows.close()
         if not success:
             shutil.rmtree(folder)
             if archive_path and os.path.exists(archive_path):

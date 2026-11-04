@@ -18,6 +18,33 @@ import export_approval_db as exporter
 
 
 class DBExportTests(unittest.TestCase):
+    def test_disk_snapshot_does_not_materialize_all_document_bodies(self):
+        import tracemalloc
+        model=json.loads((Path(exporter.HERE)/'approval_db_columns.json').read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);work=root/'work';work.mkdir();counts={table:0 for table in model};counts['approval_document']=1000
+            def execute(config,folder,commands,*args):
+                (work/'counts.csv').write_text('table_name,row_count\n'+''.join(table.encode().hex()+','+str(count).encode().hex()+'\n' for table,count in counts.items()))
+                for table,columns in model.items():
+                    with (work/(table+'.csv')).open('w') as stream:
+                        stream.write(','.join(columns)+'\n')
+                        if table=='approval_document':
+                            for number in range(1000):
+                                row={'no':str(number+1),'context':'<p>'+'BODY'*2048+'</p>','title':'Synthetic','uid':'employee'}
+                                stream.write(','.join(str(row[key]).encode().hex() if key in row else exporter.NULL for key in columns)+'\n')
+            tracemalloc.start()
+            try:
+                with patch.object(exporter,'psql_readonly',side_effect=execute):
+                    rows,expected=exporter.query_database('unused','employee',str(work),disk_backed=True)
+                self.assertIsInstance(rows['approval_document'],exporter.DiskTable)
+                self.assertEqual(len(rows['approval_document']),1000)
+                self.assertEqual(rows['approval_document'][999]['no'],'1000')
+                self.assertLess(tracemalloc.get_traced_memory()[1],4*1024*1024)
+                cell=root/'cell';(cell/'data').mkdir(parents=True)
+                generator=exporter.iter_render_bundle(exporter.Bundle(str(root/'bundle'),str(cell),'employee'),rows,expected,True)
+                self.assertEqual(next(generator)['id'],'1');generator.close();rows.close()
+            finally:tracemalloc.stop()
+
     def test_bucketed_documents_and_history_survive_flat_directory_limit_and_keep_links(self):
         from bs4 import BeautifulSoup
         import live_export_worker as worker

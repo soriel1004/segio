@@ -15,6 +15,16 @@ def members(value):
     return {part.split('@@',1)[0].strip() for part in str(value or '').split(',') if part.strip()}
 
 
+def compact_record(payload):
+    """Keep classification fields; complete original JSON remains beside each document."""
+    document=payload.get('document') or {};related=payload.get('related') or {}
+    return {'source':payload.get('source'),
+            'document':{key:document.get(key) for key in ('progress','wdate','reference','doc_recv_uid')},
+            'related':{table:[{key:row.get(key) for key in keys} for row in related.get(table,[])]
+                       for table,keys in (('approval_line',('uid','division')),('approval_line_backup',('uid','division')),
+                                          ('approval_send_box',('recv_user','recv_uid')),('approval_send_box_backup',('recv_user','recv_uid')))}}
+
+
 def draft_date(value):
     if value is None or not str(value).strip() or str(value).strip()=='0':
         return ''

@@ -26,9 +26,9 @@ async function copy(source,target,name,checkpoint=()=>{},progress=()=>{}){const 
 function rows(db,sql,params=[]){const statement=db.prepare(sql);try{statement.bind(params);const result=[];while(statement.step())result.push(statement.getAsObject());return result}finally{statement.free()}}
 function pagePath(id){if(!/^mail-\d{9}$/.test(id))fail('메일 ID 형식을 확인하세요.');return 'mail/offline/'+id+'/index.html'}
 function indexConfig(text){const start='<script id="archive-config" type="application/json">',begin=text.indexOf(start),end=text.indexOf('</script>',begin+start.length);if(begin<0||end<0)fail('새 인덱스로 백업 화면을 갱신하세요.');return {start:begin+start.length,end,value:JSON.parse(text.slice(begin+start.length,end))}}
-function validateManifest(manifest){
+async function validateManifest(manifest,report=()=>{}){
     if(!manifest.files||typeof manifest.files!=='object'||Array.isArray(manifest.files)||manifest.viewer!=='sqlite-mail/1'||manifest.portable_mail?.version!=='static-mail/1')fail('새 프로그램으로 백업 인덱스를 한 번 갱신하세요.');
-    const names=new Set();for(const [name,info] of Object.entries(manifest.files)){safe(name);const key=name.toLowerCase();if(names.has(key)||!Number.isSafeInteger(info.bytes)||info.bytes<0||!/^[a-f0-9]{64}$/.test(info.sha256))fail('백업 파일 검증 정보가 올바르지 않습니다.');names.add(key)}
+    const names=new Set(),entries=Object.entries(manifest.files);let count=0;for(const [name,info] of entries){safe(name);const key=name.toLowerCase();if(names.has(key)||!Number.isSafeInteger(info.bytes)||info.bytes<0||!/^[a-f0-9]{64}$/.test(info.sha256))fail('백업 파일 검증 정보가 올바르지 않습니다.');names.add(key);if(++count%500===0){report('백업 파일 목록 확인 '+count.toLocaleString()+' / '+entries.length.toLocaleString()+'개');await new Promise(resolve=>setTimeout(resolve,0))}}
 }
 async function guard(root,callback){
     // The exclusive writable is held open, then aborted: its original bytes are unchanged.
@@ -52,7 +52,7 @@ async function recover(root){
     const journal=await readJson(work,'journal.json');
     if(journal.protocol!==PROTOCOL||!['preparing','installing','committed'].includes(journal.phase))fail('브라우저 삭제 복구 기록을 확인하지 못했습니다. 작업 폴더를 보존하세요.');
     if(journal.phase==='installing'){
-        const before=await readJson(work,'before/manifest.json');validateManifest(before);
+        const before=await readJson(work,'before/manifest.json');await validateManifest(before);
         const seen=new Set();
         for(const operation of journal.paths){
             safe(operation.name);if(!allowed(operation.name)||seen.has(operation.name))fail('삭제 복구 경로가 올바르지 않습니다.');seen.add(operation.name);
@@ -66,32 +66,34 @@ async function recover(root){
     await cleanup(root);return true;
 }
 async function remembered(id,value){
-    try{return await new Promise((resolve,reject)=>{const request=indexedDB.open('segio-archive-folders',1);request.onupgradeneeded=()=>request.result.createObjectStore('folders');request.onerror=()=>reject(request.error);request.onsuccess=()=>{const db=request.result,transaction=db.transaction('folders',value?'readwrite':'readonly'),store=transaction.objectStore('folders'),action=value?store.put(value,id):store.get(id);let result;action.onsuccess=()=>{result=action.result};transaction.oncomplete=()=>{db.close();resolve(value||result)};transaction.onerror=()=>{db.close();reject(transaction.error)}}})}catch(error){return null}
+    try{return await new Promise((resolve,reject)=>{const request=indexedDB.open('segio-archive-folders',1);request.onupgradeneeded=()=>request.result.createObjectStore('folders');request.onerror=()=>reject(request.error);request.onblocked=()=>resolve(null);request.onsuccess=()=>{const db=request.result;try{const transaction=db.transaction('folders',value?'readwrite':'readonly'),store=transaction.objectStore('folders'),action=value?store.put(value,id):store.get(id);let result;action.onsuccess=()=>{result=action.result};transaction.oncomplete=()=>{db.close();resolve(value||result)};transaction.onerror=()=>{db.close();reject(transaction.error)}}catch(error){db.close();reject(error)}}})}catch(error){return null}
 }
 class BrowserEditor {
     static supported(){return isSecureContext&&typeof window.showDirectoryPicker==='function'}
     static folderKey(id){const url=new URL(location.href);url.hash='';url.search='';return id+'|'+url.href}
     static async remembered(id){const handle=await remembered(this.folderKey(id));try{return handle&&await handle.queryPermission({mode:'readwrite'})==='granted'?handle:null}catch(error){return null}}
-    static async open(root,config){
+    static async open(root,config,report=()=>{}){
         const editor=new BrowserEditor(root,config);
         const recovered=await guard(root,()=>recover(root));
         if(recovered)return {recovered:true};
-        await editor.load();await remembered(this.folderKey(config.archive.browser_edit_id),root);return editor;
+        editor.report=report;await editor.load(false);void remembered(this.folderKey(config.archive.browser_edit_id),root);return editor;
     }
     constructor(root,config){this.root=root;this.config=config;this.plan=null;this.job=null;this.cancelled=false}
     checkpoint(){if(this.cancelled)fail('삭제를 중단하고 기존 자료를 복원했습니다.')}
     progress(stage,completed,total){Object.assign(this.job,{stage,completed,total})}
-    async load(){
+    async load(withDatabase=true){
         const root=this.root;
         if(location.protocol==='file:'){const folder=decodeURIComponent(new URL(location.href).pathname.split('/').at(-2)||'');if(root.name.toLowerCase()!==folder.toLowerCase())fail('현재 index.html이 들어 있는 백업 폴더를 선택하세요.')}
         if(await exists(root,WORK)||await exists(root,'.segio-edit'))fail('다른 삭제 작업 또는 복구가 진행 중입니다.');
-        const manifestBlob=await file(root,'manifest.json');this.revision=await digest(manifestBlob);this.manifest=JSON.parse(await manifestBlob.text());validateManifest(this.manifest);
+        const report=this.report||(()=>{});report('백업 폴더 확인 중 · 검색 DB는 선택 후 읽습니다.');
+        const manifestBlob=await file(root,'manifest.json');this.revision=await digest(manifestBlob);this.manifest=JSON.parse(await manifestBlob.text());await validateManifest(this.manifest,report);
         const index=await checked(root,'index.html',this.manifest.files);this.index=await index.text();
         if(JSON.stringify(indexConfig(this.index).value)!==JSON.stringify(this.config)||this.manifest.browser_edit_id!==this.config.archive.browser_edit_id)fail('현재 화면과 선택한 백업 폴더가 다릅니다. 해당 폴더의 index.html을 새로 열어주세요.');
+        if(!withDatabase)return;
         // Only metadata is loaded into memory; raw MBOX bytes are streamed.
         const candidate=await file(root,'catalog.sqlite3');
-        if(candidate.size>512*1024*1024)fail('검색 DB가 512 MiB를 초과합니다. 이 백업본은 Windows 프로그램의 보관함 열기에서 삭제하세요.');
-        const sqlite=await checked(root,'catalog.sqlite3',this.manifest.files);
+        if(candidate.size>512*1024*1024)fail('기존 검색 DB가 너무 큽니다. 새 Windows 프로그램에서 보관함 열기로 인덱스를 한 번 갱신한 뒤 이 화면에서 삭제하세요. 본문·메일 원본은 유지됩니다.');
+        const sqlite=await checked(root,'catalog.sqlite3',this.manifest.files,()=>{},(n,t)=>report('삭제용 검색 DB 확인 '+(n/1024**2).toFixed(1)+' / '+(t/1024**2).toFixed(1)+' MiB'));
         const SQL=await initSqlJs();this.db=new SQL.Database(new Uint8Array(await sqlite.arrayBuffer()));
     }
     async preview(ids){

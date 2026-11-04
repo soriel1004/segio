@@ -1,5 +1,13 @@
 # 검증 결과
 
+## v0.4.22 서버 추출 부하·대량 삭제 선택 개선
+
+운영 사진은 약 39분간 database 단계 뒤 SSH_CONNECTION_OR_IO이며 콘솔까지 응답하지 않아 강제 재부팅했다고 보고받았습니다. 재부팅 후 7,780 MiB RAM 중 free 6,400 MiB, swap 0, /backup 가용 575 GiB, vmstat wa 23~27%, 제시한 messages에는 OOM/디스크 오류 기록이 없었습니다. 추가 확인에서 /backup은 ext3이고 SMART 전체 상태 PASSED, 제시한 dmesg에는 장치 오류/리셋 기록이 없었습니다. 당시 원인을 메모리나 장치 오류로 확정하지 않습니다.
+
+SSH snapshot을 disk-backed SQLite로 전환하고 순차 문서 변환·catalog 기록·이미지 캐시 한도를 적용합니다. 추출기/psql 자식에만 nice/지원 시 idle I/O/주소 공간 한도, 세션 work_mem 한도와 조회 대기 15분, 변환 20건/초 및 Dirty 쓰기 대기 검사를 적용합니다. 서버 파생 결재 HTML/JSON은 한 개의 비압축 approval-pages.bin에 순차 기록하고 전송 목록의 기존 source_offset/source_bytes로 Windows 정상 경로에 저장합니다. 서버의 수만 개 ext3 inode/journal 생성을 피하고 각 구간 SHA-256과 전체 스풀의 파일 식별 정보를 확인합니다. 작업 상위 디렉터리의 POSIX flock으로 동시 추출을 제한하고 프로세스 종료 시 해제합니다. Windows lease 갱신·2분 연결 상실·명시적 취소를 검사합니다. 기존 DB 읽기 전용 스냅샷/건수 비교와 원본 검증은 유지합니다.
+
+행 전체 hover/focus 음영, 밑줄 제거, 검색 오른쪽 삭제 버튼을 적용하고 인덱스 버전을 offline-search/10으로 올렸습니다. 브라우저 폴더 확인에서 SQLite 읽기를 분리하고 큰 manifest 검사는 이벤트 루프에 실행 기회를 넘기며, 폴더 권한 기억 저장 실패로 선택 화면이 멈추는 문제도 고쳤습니다. 결재 검색 DB는 분류 요약만 중복 저장하며 원본 JSON은 보존합니다. 기존 큰 DB 정리는 같은 볼륨의 저널/교체·복구를 사용합니다.
+
 ## v0.4.21 EMLINK 문서 디렉터리 분산
 
 사진의 errno=31은 EMLINK이며 render_bundle의 문서별 raw JSON 저장 시 디렉터리 생성에서 발생합니다. 문서/과거 기록의 전체 ID SHA-256 첫 2자리로 documents/b-xx/ID 경로를 만들고, 첨부와 목록 복귀 링크를 갱신했습니다. 옛 경로·새 경로의 native/browser 삭제 검증을 지원하고 증분 병합에서 이동한 문서의 옛 본문을 제거하며 공유 참조는 보호합니다. 디렉터리 정리는 전체 파일을 한 번 조사하여 수행합니다.

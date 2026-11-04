@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import time
 from email.parser import Parser
@@ -21,7 +22,73 @@ from live_export_worker import (read_json, write_json, check_user, mail_path, in
                                 fingerprint, file_identity, failure_details as worker_failure_details)
 
 PROTOCOL = 'segio-ssh-archive/1'
-REVISION = 'ssh-range-delta-3'
+REVISION = 'ssh-bounded-snapshot-4'
+
+
+def memory_info():
+    result={}
+    try:
+        with open('/proc/meminfo') as stream:
+            for line in stream:
+                parts=line.split()
+                if len(parts)>1:result[parts[0].rstrip(':')]=int(parts[1])*1024
+    except (IOError,ValueError):pass
+    return result
+
+
+class WorkBudget(object):
+    """Limits affect this helper/its psql client only; never the SEGIO daemon."""
+    def __init__(self, root):
+        self.root=root;self.last_document=0;self.last_memory=0;self.started=time.time();self.phase='query'
+        self.lock=None
+
+    def enter(self, apply_limits=True):
+        if os.name!='posix':return
+        import fcntl,resource
+        path=os.path.dirname(self.root)
+        self.lock=os.open(path,os.O_RDONLY|getattr(os,'O_DIRECTORY',0)|getattr(os,'O_NOFOLLOW',0))
+        info=os.fstat(self.lock)
+        if not stat.S_ISDIR(info.st_mode):raise SafeError('unsafe_job')
+        try:fcntl.flock(self.lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except IOError:raise SafeError('export_busy')
+        if apply_limits and sys.platform.startswith('linux'):
+            os.nice(10)
+            for executable in ('/usr/bin/ionice','/bin/ionice'):
+                if os.path.isfile(executable):
+                    with open(os.devnull,'wb') as null:
+                        subprocess.call([executable,'-c','3','-p',str(os.getpid())],stdout=null,stderr=null)
+                    break
+            memory=memory_info();total=memory.get('MemTotal',2*1024**3)
+            cap=max(96*1024**2,min(512*1024**2,total//8))
+            soft,hard=resource.getrlimit(resource.RLIMIT_AS)
+            if soft>0:cap=min(cap,soft)
+            if hard>0:cap=min(cap,hard)
+            resource.setrlimit(resource.RLIMIT_AS,(cap,hard))
+
+    def close(self):
+        if self.lock is not None:os.close(self.lock);self.lock=None
+
+    def check(self):
+        now=time.time()
+        if os.path.exists(os.path.join(self.root,'cancel')):raise SafeError('export_cancelled')
+        lease=os.path.join(self.root,'lease')
+        if os.path.isfile(lease) and now-os.stat(lease).st_mtime>120:raise SafeError('export_client_disconnected')
+        if self.phase=='query' and now-self.started>900:raise SafeError('db_query_budget')
+        if now-self.last_memory>=1:
+            memory=memory_info();available=memory.get('MemAvailable',memory.get('MemFree',0)+memory.get('Buffers',0)+memory.get('Cached',0))
+            if memory and available<max(128*1024**2,memory.get('MemTotal',0)//20):raise SafeError('server_memory_pressure')
+            self.last_memory=now
+
+    def document(self):
+        self.phase='render';self.check()
+        waiting=time.time()
+        while memory_info().get('Dirty',0)>64*1024**2:
+            self.check()
+            if time.time()-waiting>30:raise SafeError('server_io_pressure')
+            time.sleep(.25)
+        remaining=.05-(time.time()-self.last_document)
+        if remaining>0:time.sleep(remaining)
+        self.last_document=time.time()
 
 
 def open_source(path):
@@ -149,7 +216,7 @@ def failure_details(exc, stage):
     functions = ('prepare', 'verify_sources', 'read_json', 'write_json', 'run_export',
                  'reference_file', 'hash_file', 'fingerprint', 'inventory',
                  'render_bundle', 'attachment', 'local_file', 'image', 'freeze',
-                 'query_database', 'psql_readonly', 'read_rows', 'private_root', 'text')
+                 'query_database', 'psql_readonly', 'read_rows', 'iter_rows', 'iter_render_bundle', 'private_root', 'text')
     trace = sys.exc_info()[2]
     while trace is not None:
         frame = trace.tb_frame
@@ -264,30 +331,60 @@ def private_root(root):
     return root, request
 
 
-def prepare(root):
+def prepare(root, apply_limits=False):
     root, request = private_root(root)
     status_path = os.path.join(root, 'status.json')
     stage = 'initializing'
     references, reference_checks = {}, []
+    budget=WorkBudget(root);last_report=[0];current={'phase':'query'}
+    spool=[None];spooled=[];spool_path=os.path.join(root,'approval-pages.bin')
     def reference_file(path, relative):
         identity = fingerprint(path)
-        details = hash_file(path, identity)
+        details = hash_file(path, identity,lambda _:pulse())
         references[relative] = dict(details, path=relative, source_hex=source_hex(path))
         reference_checks.append({'source_hex': source_hex(path), 'identity': list(identity)})
         return details
     def status(state, **fields):
+        if state=='running':
+            if stage=='mail':budget.phase='mail'
+            budget.check()
         value = {'protocol': PROTOCOL, 'revision': REVISION, 'state': state, 'stage': stage}
         value.update(fields)
         write_json(status_path, value)
+    def pulse():
+        budget.check()
+        if time.time()-last_report[0]>=1:
+            status('running',**current);last_report[0]=time.time()
+    def detail(phase,done,total):
+        budget.phase=phase
+        if phase=='render':budget.document()
+        current.update(phase=phase,records_done=done,records_total=total);pulse()
+    def write_file(relative,data):
+        # One sequential file avoids tens of thousands of ext3 inode/journal
+        # updates. Windows writes each verified range to its normal final path.
+        if spool[0] is None:spool[0]=open(spool_path,'wb')
+        offset=spool[0].tell()
+        for start in range(0,len(data),1024*1024):
+            pulse();spool[0].write(data[start:start+1024*1024])
+        details={'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
+        references[relative]=dict(details,path=relative,source_hex=source_hex(spool_path),source_offset=offset)
+        spooled.append(relative)
+        return details
     try:
+        budget.enter(apply_limits)
         user = request['user']
         since=approval_cutoff(request.get('since'))
         if request['approvals']:
             stage = 'database'
             status('running')
-            options=dict(cell=request['cell'],binary=request['psql'],live_scope=True,pack=False,reference_file=reference_file)
+            options=dict(cell=request['cell'],binary=request['psql'],live_scope=True,pack=False,reference_file=reference_file,checkpoint=pulse,progress_detail=detail,write_file=write_file)
             if since is not None:options['approval_since']=since
             folder, archive = run_export(request['db_config'], user, root, **options)
+            if spool[0] is not None:
+                spool[0].close();spool[0]=None
+                identity=fingerprint(spool_path)
+                for name in spooled:references[name]['source_bytes']=identity[2]
+                reference_checks.append({'source_hex':source_hex(spool_path),'identity':list(identity)})
             if archive:
                 os.unlink(archive)
             manifest = read_json(os.path.join(folder, 'manifest.json'), None)
@@ -304,7 +401,7 @@ def prepare(root):
             for name in ('catalog.json', 'index.html'):
                 manifest['files'][name] = hash_file(os.path.join(folder, name))
         write_json(os.path.join(root, 'approval-check.json'), reference_checks)
-        transfers, sources = list(references.values()), []
+        transfers, sources = sorted(references.values(),key=lambda item:(item['source_hex'],item.get('source_offset',0))), []
         if request['mail']:
             stage = 'mail'
             status('running', files_done=0)
@@ -322,6 +419,7 @@ def prepare(root):
         manifest['ssh_export'] = {'protocol': PROTOCOL, 'job': os.path.basename(root),
             'approvals': request['approvals'], 'mail': request['mail'], 'authentication': 'administrator_ssh',
             'source_transfer': 'direct-mail-and-attachments/1'}
+        if spooled:manifest['ssh_export']['derived_storage']='sequential-ranges/1'
         if since is not None:manifest['ssh_export']['since']=since
         manifest['warnings'].append('Export requested by SSH administrator; employee password was not verified.')
         manifest['counts']['mail_files'] = len(sources)
@@ -341,6 +439,11 @@ def prepare(root):
         code, diagnostic = failure_details(exc, stage)
         save_failure(root, code, diagnostic)
         status('failed', code=code, diagnostic=diagnostic)
+    finally:
+        if spool[0] is not None:
+            try:spool[0].close()
+            except (IOError,OSError):pass
+        budget.close()
 
 
 def verify_sources(root):
@@ -386,7 +489,7 @@ def main():
                     os.dup2(descriptor, number)
                 if descriptor > 2:
                     os.close(descriptor)
-            prepare(root)
+            prepare(root,apply_limits=True)
         elif options.action == 'verify':
             verify_sources(root)
         else:

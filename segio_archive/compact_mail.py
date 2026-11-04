@@ -12,6 +12,7 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from .mail_import import header_text, decode_bytes, PARSE_LIMIT
 from .web import CollectionError
+from .approval_folders import compact_record
 
 
 def digest_file(path, checkpoint=lambda: None, progress=None):
@@ -101,7 +102,7 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
             db.execute('INSERT INTO items VALUES (?,?,?,?,?,?)',
                        ('approval-'+item['id'], 'approval', item['title'], '결재 문서', item['search'], item['path']))
             db.execute('INSERT INTO document_records VALUES (?,?)',
-                       ('approval-'+item['id'], (root/item['json']).read_text(encoding='utf-8')))
+                       ('approval-'+item['id'], json.dumps(compact_record(json.loads((root/item['json']).read_text(encoding='utf-8'))),ensure_ascii=False)))
             report('catalog',number,len(catalog['items']),'records','결재 DB 색인')
         total_bytes=sum(source['bytes'] for source in sources['sources'] if source.get('format') in ('mbox','rfc822'))
         indexed_bytes=0
@@ -144,6 +145,7 @@ def build_compact_catalog(root: Path, user: str, checkpoint=lambda: None, log=la
     temporary.replace(database)
     manifest['counts']['mail'] = mail_count
     manifest['viewer'] = 'sqlite-mail/1'
+    manifest['approval_index'] = 'summary/1'
     manifest['coverage'] = [entry for entry in manifest['coverage'] if entry.get('kind') != 'mail_index']
     manifest['coverage'].append({'kind':'mail_index', 'status':'headers_indexed', 'saved':mail_count,
                                  'unrecognized_files':issue_count, 'body':'read_from_raw_on_demand'})

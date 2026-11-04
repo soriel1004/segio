@@ -446,6 +446,8 @@ def prepare_archive(root, checkpoint=lambda:None, log=lambda _:None, progress=No
         raise CollectionError('index.html이 변경되었습니다. 파일 무결성을 확인하세요.')
     if digest_file(root/'catalog.sqlite3',checkpoint,lambda done,total:report('validate',done,total,'bytes','검색 DB 무결성 확인'))!=manifest['files'].get('catalog.sqlite3'):
         raise CollectionError('메일 검색 DB가 변경되었습니다. 파일 무결성을 확인하세요.')
+    from .index_maintenance import compact_approval_index
+    manifest=compact_approval_index(root,manifest,checkpoint,progress)
     if manifest.get('portable_mail',{}).get('version')==VERSION:
         count=manifest['portable_mail']['count']
         report('mail',count,count,'messages','이미 준비된 메일 바로보기 사용',force=True)

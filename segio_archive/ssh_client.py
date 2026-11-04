@@ -47,7 +47,7 @@ except (IOError,OSError) as error:
 CHECK_SCRIPT = '''import json,os,sys
 config,cell,psql,mail,work=sys.argv[1:]
 try:
- import hashlib,zipfile,zlib
+ import hashlib,zipfile,zlib,sqlite3
  modules=True
 except ImportError:
  modules=False
@@ -68,6 +68,7 @@ TOOLS = ('remote_ssh_export.py','live_export_worker.py','export_approval_db.py',
 
 def ssh_failure_message(code, diagnostic=None, phase=''):
     codes={'export_failed','invalid_metadata','unsafe_job','invalid_identity','export_not_ready','server_directory_limit',
+        'server_memory_pressure','server_memory_limit','server_io_pressure','server_sqlite_unavailable','db_query_budget','export_client_disconnected','export_cancelled','export_busy',
         'server_disk_full','server_access_denied','server_file_missing','server_file_too_large',
         'mail_changed_retry','mail_unsafe_file','mail_unsafe_symlink','mail_path_unconfigured',
         'mail_path_missing_or_symlink','job_storage_failed','db_config_invalid','db_config_unreadable',
@@ -102,7 +103,7 @@ def ssh_failure_message(code, diagnostic=None, phase=''):
     site=diagnostic.get('site')
     functions={'prepare','verify_sources','read_json','write_json','run_export','reference_file','hash_file',
                'fingerprint','inventory','render_bundle','attachment','local_file','image','freeze',
-               'query_database','psql_readonly','read_rows','private_root','text'}
+               'query_database','psql_readonly','read_rows','iter_rows','iter_render_bundle','private_root','text'}
     if isinstance(site,dict) and isinstance(site.get('function'),str) and site['function'] in functions and type(site.get('line')) is int and 0<site['line']<1000000:
         details.append(site['function']+':'+str(site['line']))
     if details:message+='\n진단: '+' · '.join(details)
@@ -345,7 +346,12 @@ class SSHCollector:
             self.sftp.chmod(self.remote+'/'+name,0o600)
         atomic_write(state_path,json.dumps({'remote':self.remote,'protocol':PROTOCOL,'retired':self.retired}).encode())
         os.chmod(state_path,0o600)
+        self.heartbeat()
         self.execute('prepare',detach=True)
+
+    def heartbeat(self):
+        with self.sftp.open(self.remote+'/lease','w') as stream:stream.write(b'active')
+        self.sftp.chmod(self.remote+'/lease',0o600)
 
     def refresh_ready_helper(self):
         """Repair verification in a finished server job without re-extracting it."""
@@ -461,15 +467,21 @@ class SSHCollector:
 
     def wait_ready(self):
         previous, deadline, reported = None, time.monotonic()+72*3600, 0.0
+        last_heartbeat=0.0
         while time.monotonic()<deadline:
             self.checkpoint()
+            if time.monotonic()-last_heartbeat>=15:
+                self.heartbeat();last_heartbeat=time.monotonic()
             status = self.read_json(self.remote+'/status.json',65536)
             if status.get('protocol') != PROTOCOL:
                 raise CollectionError('SSH 작업기 형식이 일치하지 않습니다.')
             stage = status.get('stage')
             detail={'initializing':'서버 작업 준비 중','database':'결재 DB 읽기 전용 추출 중',
                     'mail':'서버 메일 원본 검사 중'}.get(stage,'서버 추출 준비 확인 중')
-            if stage=='mail' and status.get('total_bytes') is not None:
+            if stage=='database' and status.get('records_total') is not None:
+                label={'snapshot':'DB 기록을 디스크에 정리 중','render':'결재 본문·첨부 생성 중'}.get(status.get('phase'),detail)
+                self.report('server',status.get('records_done',0),status['records_total'],'records',label)
+            elif stage=='mail' and status.get('total_bytes') is not None:
                 self.report('server',status.get('completed_bytes',0),status['total_bytes'],'bytes',
                     detail+f' · {status.get("files_done",0):,}/{status.get("files_total",0):,}개 · 시도 {status.get("attempt",1)}/3')
             else:
@@ -679,7 +691,13 @@ class SSHCollector:
             self.report('cleanup',1,1,'steps',detail,force=True)
             self.log('SSH 백업과 SHA-256 검증 완료: '+str(result))
             return result
-        except (CollectionError,Cancelled):
+        except Cancelled:
+            if self.remote and self.sftp and self.phase=='서버 DB 추출·메일 검사':
+                try:
+                    with self.sftp.open(self.remote+'/cancel','w') as stream:stream.write(b'cancel')
+                except (OSError,paramiko.SSHException):pass
+            raise
+        except CollectionError:
             raise
         except paramiko.BadHostKeyException:
             raise CollectionError('저장된 SSH 서버 지문과 다릅니다. 관리자에게 서버 지문을 확인하세요. [SSH_HOST_KEY_CHANGED]') from None

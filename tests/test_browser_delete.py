@@ -23,7 +23,7 @@ import test_search_page as fixtures
 @unittest.skipUnless(fixtures.BROWSER,'Real Chromium required')
 class BrowserDeleteTests(unittest.TestCase):
     @contextmanager
-    def opened(self,root):
+    def opened(self,root,large_manifest=False):
         # HTTP is only the test transport: it permits OPFS automation without
         # clicking an OS dialog. There is no export or deletion HTTP endpoint.
         class Static(SimpleHTTPRequestHandler):
@@ -56,11 +56,29 @@ class BrowserDeleteTests(unittest.TestCase):
                             await writer.write(Uint8Array.from(atob(value),c=>c.charCodeAt(0)));await writer.close();
                         }
                     }''',payload)
+                    if large_manifest:
+                        page.evaluate('''async()=>{
+                            const handle=await testRoot.getFileHandle('manifest.json'),manifest=JSON.parse(await(await handle.getFile()).text());
+                            for(let n=0;n<31000;n++)for(const leaf of ['document.html','database.json'])manifest.files['documents/b-00/'+n+'/'+leaf]={bytes:0,sha256:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'};
+                            const writer=await handle.createWritable();await writer.write(JSON.stringify(manifest));await writer.close();
+                            window.sqliteReads=0;const original=testRoot;
+                            window.testRoot=new Proxy(original,{get(target,key){if(key==='getFileHandle')return async(name,options)=>{if(name==='catalog.sqlite3'){sqliteReads++;throw Error('SQLITE_MUST_BE_DEFERRED')}return target.getFileHandle(name,options)};const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value}});
+                        }''')
                     page.locator('#delete-selected').click()
                     expect(page.locator('#select-page')).to_be_visible(timeout=15000)
                     yield page,errors
                 finally:browser.close()
         finally:server.shutdown();server.server_close();thread.join()
+
+    def test_selection_for_31000_document_pairs_is_ready_without_loading_sqlite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);deletion.LocalDeleteTests().fixture(root)
+            with self.opened(root,large_manifest=True) as (page,errors):
+                self.assertEqual(page.evaluate('sqliteReads'),0)
+                self.assertIsNone(page.evaluate('browserEditor.db||null'))
+                page.locator('.item-select[data-id="approval-current"]').check()
+                self.assertTrue(page.locator('#delete-selected').is_enabled())
+                self.assertEqual(errors,[])
 
     def exported(self,page,target):
         payload=page.evaluate('''async()=>{

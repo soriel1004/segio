@@ -39,6 +39,7 @@ FAILURE_CODES = set(('db_config_invalid', 'db_config_unreadable', 'psql_unavaila
     'server_access_denied', 'server_file_missing', 'export_failed',
     'secure_random_unavailable', 'csrf_required', 'read_only', 'unexpected_parameter',
     'server_directory_limit',
+    'server_memory_pressure','server_memory_limit','server_io_pressure','server_sqlite_unavailable','db_query_budget','export_client_disconnected','export_cancelled',
     'empty_selection', 'invalid_baseline', 'invalid_mail_since', 'invalid_approval_since',
     'job_storage_failed', 'export_process_unavailable',
     'export_already_running', 'export_busy', 'mail_path_unconfigured'))
@@ -56,6 +57,7 @@ def failure_details(exc, stage):
                 errno.ENOENT: 'server_file_missing'}.get(number, 'export_failed')
         if isinstance(exc, UnicodeError) and stage == 'database':
             code = 'db_encoding_failed'
+        if isinstance(exc,MemoryError):code='server_memory_limit'
     # Never record exception text, paths, SQL, employee IDs or secrets.
     category = ('io' if isinstance(exc, (IOError, OSError)) else
                 'validation' if isinstance(exc, SafeError) else

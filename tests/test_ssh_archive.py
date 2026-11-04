@@ -30,6 +30,39 @@ from ssh_fixture import SSHServer
 
 
 class SSHArchiveTests(unittest.TestCase):
+    def test_work_budget_stops_disconnected_cancelled_and_memory_starved_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);budget=helper.WorkBudget(str(root))
+            with patch.object(helper,'memory_info',return_value={'MemTotal':8*1024**3,'MemFree':4*1024**3}):
+                (root/'lease').write_bytes(b'active');os.utime(root/'lease',(1,1))
+                with self.assertRaisesRegex(helper.SafeError,'export_client_disconnected'):budget.check()
+                (root/'lease').unlink();(root/'cancel').touch()
+                with self.assertRaisesRegex(helper.SafeError,'export_cancelled'):budget.check()
+                (root/'cancel').unlink()
+            with patch.object(helper,'memory_info',return_value={'MemTotal':8*1024**3,'MemFree':1}):
+                with self.assertRaisesRegex(helper.SafeError,'server_memory_pressure'):budget.check()
+            budget.started=0
+            with self.assertRaisesRegex(helper.SafeError,'db_query_budget'):budget.check()
+            for code in ('export_client_disconnected','export_cancelled','server_memory_pressure','db_query_budget'):
+                actual,detail=helper.failure_details(helper.SafeError(code),'database')
+                self.assertEqual(actual,code);self.assertIn('['+code+']',ssh_failure_message(actual,detail))
+
+    @unittest.skipUnless(os.name=='posix','POSIX process limits and lock')
+    def test_server_work_is_serialized_and_limits_stay_in_child_process(self):
+        import resource
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);first=helper.WorkBudget(str(root/'one'));second=helper.WorkBudget(str(root/'two'))
+            first.enter(False)
+            try:
+                with self.assertRaisesRegex(helper.SafeError,'export_busy'):second.enter(False)
+            finally:first.close();second.close()
+            second.enter(False);second.close()
+            before=resource.getrlimit(resource.RLIMIT_AS)
+            code="import sys,os,resource,json;sys.path.insert(0,sys.argv[1]);import remote_ssh_export as h;b=h.WorkBudget(sys.argv[2]);b.enter();print(json.dumps({'cap':resource.getrlimit(resource.RLIMIT_AS)[0],'priority':os.getpriority(os.PRIO_PROCESS,0)}));b.close()"
+            result=json.loads(subprocess.check_output([sys.executable,'-c',code,str(Path(helper.__file__).parent),str(root/'child')]))
+            self.assertLessEqual(result['cap'],512*1024**2);self.assertGreaterEqual(result['priority'],10)
+            self.assertEqual(resource.getrlimit(resource.RLIMIT_AS),before)
+
     def fixture(self,root):
         settings,original=create_fixture(root)
         server=SSHServer(root)
@@ -247,6 +280,16 @@ class SSHArchiveTests(unittest.TestCase):
                 self.assertLess(sum(path.stat().st_size for path in job.rglob('*') if path.is_file()),len(payload))
                 self.assertFalse(list(job.rglob('*.zip')))
                 self.assertFalse(list(job.rglob('attachments/*.bin')))
+                self.assertTrue((job/'approval-pages.bin').is_file())
+                self.assertFalse(list(job.rglob('document.html')))
+                self.assertFalse(list(job.rglob('database.json')))
+                entries=json.loads((job/'transfer.json').read_text())['files']
+                pages=[item for item in entries if item['path'].startswith(exporter.document_directory('1')+'/') and '/attachments/' not in item['path']]
+                self.assertEqual(len(pages),2)
+                self.assertEqual([item['source_offset'] for item in pages],sorted(item['source_offset'] for item in pages))
+                data=(job/'approval-pages.bin').read_bytes()
+                for item in pages:
+                    self.assertEqual(hashlib.sha256(data[item['source_offset']:item['source_offset']+item['bytes']]).hexdigest(),item['sha256'])
                 transfer(folder)
             collector.transfer=inspect_then_transfer
             with patch.object(exporter,'query_database',return_value=(rows,counts)):

@@ -271,7 +271,8 @@ def merge(base,incoming,stage,checkpoint=lambda:None,log=lambda _:None,progress=
         for item in fresh['items']:
             identity='approval-'+item['id']
             db.execute('INSERT OR REPLACE INTO items VALUES (?,?,?,?,?,?)',(identity,'approval',item['title'],'결재 문서',item['search'],item['path']))
-            db.execute('INSERT OR REPLACE INTO document_records VALUES (?,?)',(identity,(incoming/item['json']).read_text(encoding='utf-8')))
+            from .approval_folders import compact_record
+            db.execute('INSERT OR REPLACE INTO document_records VALUES (?,?)',(identity,json.dumps(compact_record(load(incoming/item['json'])),ensure_ascii=False)))
         db.commit()
         result['counts']=dict(db.execute('SELECT kind,count(*) FROM items GROUP BY kind'))
         result['counts'].setdefault('mail',0);result['counts'].setdefault('approval',0)
