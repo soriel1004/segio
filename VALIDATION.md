@@ -12,6 +12,8 @@ SSH 임시 인덱스는 작은 대기 안내로 바꾸고 standalone 인덱스�
 
 로컬 최종 전체 186개는 실패·오류 0개, GUI/관리형 Chromium file URL 정책 12개 건너뜀으로 완료했습니다. 관련 DB 19개(대형 기록/다수 파일/중단/50 GiB 이상 숫자 포함), SSH 20개 및 증분 11개도 통과했습니다. 실제 PostgreSQL 16.2와 현재 Python·실제 Python 2.6.9의 SSH DB/MBOX 준비·원본 검증, NULL/Unicode·현재/과거 범위·첨부·검색 확인도 통과했습니다. 실제 운영 계정 전체 50GB 백업 완료를 확인한 것은 아닙니다.
 
+최종 [Actions #76](https://github.com/soriel1004/segio/actions/runs/41999248816) (`b034a9a`)에서 Linux·Windows 전체 검사와 Windows EXE 파일/제품 버전 확인·빌드·업로드가 성공했습니다. Windows v0.4.24 아티팩트 ID `13401747660`, 표시 373 MB, SHA-256 `e82fb2ffff8996ed418e5f18527bac0004940886992bf6a2fc41b91489f8e7af`입니다. 새 ZIP 전체를 새 폴더에 풀고 실행 버전을 확인하여 사용하며 서버 재설치는 필요 없습니다. 실제 운영 계정 재실행의 완료 여부는 현장 결과로 확인해야 합니다.
+
 ## v0.4.23 대형 관련 기록 JSON/HTML의 MemoryError
 
 운영 화면은 server_memory_limit/database/MemoryError/iter_render_bundle:785입니다. v0.4.22의 해당 줄은 json.dumps(raw, ensure_ascii=False, indent=2)이며 DiskGroup.get이 관련 행 전체를 목록으로 읽은 후 원본 JSON 문자열/UTF-8 사본까지 함께 보관했습니다. HTML 결재선도 전체 행·서명 문자열 목록을 만든 뒤 합쳤습니다. 계정 전체 용량이 아니라 단일 문서 관련 기록과 여러 사본의 메모리 피크가 문제가 될 수 있는 구조입니다. 운영 계정별 용량이 다르고 큰 계정은 약 50GB라고 확인했습니다.
