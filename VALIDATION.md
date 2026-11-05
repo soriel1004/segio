@@ -1,5 +1,17 @@
 # 검증 결과
 
+## v0.4.24 최종 파일 목록 생성의 MemoryError
+
+운영 오류는 server_memory_limit/database/MemoryError/run_export:1016입니다. v0.4.23의 해당 줄은 json.dumps({items: [], manifest: manifest}, ensure_ascii=False)이며 문서별 원본/HTML을 조각으로 쓰고도 전체 files 맵을 SSH 임시 HTML에 다시 복제했습니다. 마지막 manifest, worker의 검증/전송 JSON과 file manifest 재읽기에도 큰 객체 사본이 남아 있었습니다.
+
+SSH 임시 인덱스는 작은 대기 안내로 바꾸고 standalone 인덱스도 JSON을 이스케이프하며 순차 기록합니다. 파일 메타데이터/원본 참조/확인 사항/검증 목록/전송 목록을 작업별 SQLite로 옮겼습니다. exporter가 준비한 작은 header와 디스크 files 맵을 worker에 넘겨 큰 manifest를 재파싱하지 않습니다. 각 목록/문자열 JSON 생성은 기존 64 KiB 이하 조각 방식을 사용하고 검증/전송 값과 구간 순서를 보존합니다. 임시 metadata DB는 프로세스 내부 작업용이며 완료 JSON을 쓰고 닫을 때 삭제합니다. PostgreSQL 데이터나 인증 설정은 변경하지 않습니다.
+
+최종 목록 작성 중에도 checkpoint로 연결 유지/중단 요청을 확인하고 별도 metadata 단계를 표시합니다. 원자적 JSON 교체의 중단 시 이전 JSON을 유지하는 것과 50 GiB를 넘는 메타데이터 숫자/구간 오프셋, Unicode/NULL 보존을 확인합니다. Windows 시험 어댑터도 새 optional checkpoint 인자를 전달합니다.
+
+합성 31,000건·파생 파일 62,000개의 SSH 준비 전체가 128 MiB 주소 공간 제한에서 현재 Python 및 실제 Python 2.6.9로 완료됐습니다. 검증 단계에서 모든 manifest/transfer 경로 집합·바이트·SHA-256, 구간의 연속성·오프셋, 작은 임시 HTML 및 임시 metadata DB 정리, 원본 식별 정보를 대조했습니다. 같은 자료를 이전 v0.4.23 도구로 실행하면 run_export:1022의 임시 HTML 삽입 단계에서 server_memory_limit/MemoryError가 발생했습니다. 운영 화면은 그 직전 JSON 생성 줄 1016이므로 두 복제 경로를 모두 제거했습니다.
+
+로컬 최종 전체 186개는 실패·오류 0개, GUI/관리형 Chromium file URL 정책 12개 건너뜀으로 완료했습니다. 관련 DB 19개(대형 기록/다수 파일/중단/50 GiB 이상 숫자 포함), SSH 20개 및 증분 11개도 통과했습니다. 실제 PostgreSQL 16.2와 현재 Python·실제 Python 2.6.9의 SSH DB/MBOX 준비·원본 검증, NULL/Unicode·현재/과거 범위·첨부·검색 확인도 통과했습니다. 실제 운영 계정 전체 50GB 백업 완료를 확인한 것은 아닙니다.
+
 ## v0.4.23 대형 관련 기록 JSON/HTML의 MemoryError
 
 운영 화면은 server_memory_limit/database/MemoryError/iter_render_bundle:785입니다. v0.4.22의 해당 줄은 json.dumps(raw, ensure_ascii=False, indent=2)이며 DiskGroup.get이 관련 행 전체를 목록으로 읽은 후 원본 JSON 문자열/UTF-8 사본까지 함께 보관했습니다. HTML 결재선도 전체 행·서명 문자열 목록을 만든 뒤 합쳤습니다. 계정 전체 용량이 아니라 단일 문서 관련 기록과 여러 사본의 메모리 피크가 문제가 될 수 있는 구조입니다. 운영 계정별 용량이 다르고 큰 계정은 약 50GB라고 확인했습니다.

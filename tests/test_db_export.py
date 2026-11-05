@@ -18,6 +18,35 @@ import export_approval_db as exporter
 
 
 class DBExportTests(unittest.TestCase):
+    def test_streamed_metadata_preserves_large_offsets_and_cancel_keeps_previous_json(self):
+        import live_export_worker as worker
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);store=exporter.MetadataStore(str(root/'metadata.sqlite3'))
+            try:
+                files=store.mapping('files');records=store.sequence('records')
+                files['mail/raw/한글.mbox']={'bytes':50*1024**3,'sha256':'0'*64}
+                records.append({'source_offset':50*1024**3+123,'text':'한글','optional':None})
+                path=root/'state.json';worker.write_json(str(path),{'files':files,'records':records})
+                saved=path.read_bytes();decoded=json.loads(saved)
+                self.assertEqual(decoded['files']['mail/raw/한글.mbox']['bytes'],50*1024**3)
+                self.assertEqual(decoded['records'][0]['source_offset'],50*1024**3+123)
+                self.assertEqual(decoded['records'][0]['text'],'한글')
+                def stop():raise worker.SafeError('export_cancelled')
+                with self.assertRaisesRegex(worker.SafeError,'export_cancelled'):
+                    worker.write_json(str(path),{'files':files,'records':records},checkpoint=stop)
+                self.assertEqual(path.read_bytes(),saved)
+            finally:store.close()
+
+    def test_many_file_manifests_and_ssh_ledgers_finish_under_128_mib(self):
+        runtimes=[sys.executable]
+        if os.environ.get('SEGIO_TEST_PYTHON26'):runtimes.append(os.environ['SEGIO_TEST_PYTHON26'])
+        for executable in runtimes:
+            with self.subTest(runtime=executable),tempfile.TemporaryDirectory() as tmp:
+                result=subprocess.run([executable,str(Path(__file__).parent/'large_metadata_fixture.py'),tmp],
+                                      capture_output=True,text=True,timeout=180)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual(json.loads(result.stdout)['derived_files'],62000)
+
     def test_large_related_records_and_history_render_under_128_mib_limit(self):
         runtimes=[sys.executable]
         if os.environ.get('SEGIO_TEST_PYTHON26'):runtimes.append(os.environ['SEGIO_TEST_PYTHON26'])

@@ -18,7 +18,7 @@ import zipfile
 import zlib
 from optparse import OptionParser
 
-from export_approval_db import run_export, approval_cutoff, APPROVAL_DATE_REVISION, APPROVAL_DATE_PROTOCOL,DB_QUERY_PHASES
+from export_approval_db import run_export, approval_cutoff, APPROVAL_DATE_REVISION, APPROVAL_DATE_PROTOCOL,DB_QUERY_PHASES,json_chunks,byte_chunks
 from export_schema_from_segio_config import SafeError
 
 PROTOCOL = 'segio-live-archive/1'
@@ -100,11 +100,13 @@ class MailChanged(SafeError):
                            'fields': [key for key, a, b in zip(fields, expected, actual) if a != b]}
 
 
-def write_json(path, value):
+def write_json(path, value, checkpoint=None):
     fd, temporary = tempfile.mkstemp(prefix='.update-', dir=os.path.dirname(path))
     stream = os.fdopen(fd, 'wb')
     try:
-        stream.write(json.dumps(value, ensure_ascii=False).encode('utf-8'))
+        for chunk in byte_chunks(json_chunks(value)):
+            if checkpoint:checkpoint()
+            stream.write(chunk)
     finally:
         stream.close()
     # Windows rename does not replace files; the deployed worker uses POSIX.

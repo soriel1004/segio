@@ -207,13 +207,13 @@ class Access(paramiko.ServerInterface):
                     namespace=prepare.__globals__.copy()
                     if os.name=='nt':
                         write_json=namespace['write_json']
-                        def serialized_write(path,value):
+                        def serialized_write(path,value,**kwargs):
                             with self.owner.metadata_lock:
                                 # Emulate POSIX replacement across transient
                                 # Windows scanner/handle sharing violations.
                                 deadline=time.monotonic()+2
                                 while True:
-                                    try:return write_json(path,value)
+                                    try:return write_json(path,value,**kwargs)
                                     except OSError as exc:
                                         if getattr(exc,'winerror',None) not in (5,32,33) or time.monotonic()>=deadline:raise
                                         time.sleep(.01)

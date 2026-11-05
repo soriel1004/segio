@@ -81,6 +81,7 @@ def ssh_failure_message(code, diagnostic=None, phase=''):
         message='SSH 서버 작업을 완료하지 못했습니다. 작업 폴더의 진단 기록을 확인하세요. ['+code+']'
     diagnostic=diagnostic if isinstance(diagnostic,dict) else {}
     stages={'initializing':'서버 작업 준비','database':'결재 DB 추출','mail':'메일 원본 검사',
+            'metadata':'최종 파일·검증 목록 저장',
             'verification':'서버 원본 변경 검사','cleanup':'서버 임시 작업 정리'}
     raw_stage=diagnostic.get('stage')
     stage=stages.get(raw_stage,phase) if isinstance(raw_stage,str) else phase
@@ -477,8 +478,11 @@ class SSHCollector:
                 raise CollectionError('SSH 작업기 형식이 일치하지 않습니다.')
             stage = status.get('stage')
             detail={'initializing':'서버 작업 준비 중','database':'결재 DB 읽기 전용 추출 중',
+                    'metadata':'파일 목록·검증 정보 순차 저장 중',
                     'mail':'서버 메일 원본 검사 중'}.get(stage,'서버 추출 준비 확인 중')
-            if stage=='database' and status.get('records_total') is not None:
+            if stage=='metadata' or stage=='database' and status.get('phase')=='metadata':
+                self.report('server',detail='파일 목록·검증 정보 순차 저장 중')
+            elif stage=='database' and status.get('records_total') is not None:
                 label={'snapshot':'DB 기록을 디스크에 정리 중','render':'결재 본문·첨부 생성 중'}.get(status.get('phase'),detail)
                 self.report('server',status.get('records_done',0),status['records_total'],'records',label)
             elif stage=='mail' and status.get('total_bytes') is not None:
@@ -488,6 +492,7 @@ class SSHCollector:
                 self.report('server',detail=detail)
             if stage != previous:
                 self.log({'initializing':'SSH 서버 작업 준비 중','database':'직원의 결재 DB를 읽기 전용으로 추출하는 중',
+                          'metadata':'파일 목록과 검증·전송 정보를 순차 저장하는 중',
                           'mail':'MBOX 원본 목록과 SHA-256을 확인하는 중 · 서버에 메일 복사본을 만들지 않습니다'}.get(stage,'SSH 추출 준비 확인 중'))
                 previous = stage
             if stage=='mail' and status.get('total_bytes') is not None and time.monotonic()-reported>=2:

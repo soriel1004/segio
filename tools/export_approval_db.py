@@ -312,14 +312,14 @@ def text_chunks(value,limit=16384):
 
 def json_chunks(value):
     """Stream every row and escape long strings in bounded pieces (Python 2.6)."""
-    if isinstance(value,dict):
+    if isinstance(value,(dict,MetadataMap)):
         yield '{'
         for number,(key,item) in enumerate(value.items()):
             if number:yield ','
             yield json.dumps(key,ensure_ascii=True);yield ':'
             for chunk in json_chunks(item):yield chunk
         yield '}'
-    elif isinstance(value,(list,tuple,DiskTable,DiskSelection)):
+    elif isinstance(value,(list,tuple,DiskTable,DiskSelection,MetadataList)):
         yield '['
         for number,item in enumerate(value):
             if number:yield ','
@@ -363,6 +363,91 @@ def format_chunks(template,values):
 class DiskRows(dict):
     def close(self):
         self.db.close()
+
+
+class MetadataStore(object):
+    """Disposable server metadata, independent of the approval row snapshot."""
+    def __init__(self,path):
+        if sqlite3 is None:raise SafeError('Standard sqlite3 module unavailable.','server_sqlite_unavailable')
+        self.path=path;self.db=sqlite3.connect(path)
+        for setting in ('cache_size=512','temp_store=FILE','journal_mode=OFF','synchronous=OFF'):
+            self.db.execute('PRAGMA '+setting)
+
+    def mapping(self,name,ordered=False):
+        return MetadataMap(self.db,'metadata_'+name,ordered)
+
+    def sequence(self,name):
+        return MetadataList(self.db,'metadata_'+name)
+
+    def close(self):
+        self.db.close()
+        if os.path.exists(self.path):os.unlink(self.path)
+
+
+class MetadataMap(object):
+    def __init__(self,db,name,ordered=False):
+        self.db,self.table=db,quote_identifier(name)
+        db.execute('CREATE TABLE '+self.table+' (name TEXT PRIMARY KEY,payload TEXT,source TEXT,offset INTEGER)')
+        if ordered:db.execute('CREATE INDEX '+quote_identifier(name+'_order')+' ON '+self.table+' (source,offset)')
+
+    def __setitem__(self,key,value):
+        self.db.execute('INSERT OR REPLACE INTO '+self.table+' VALUES (?,?,?,?)',
+            (key,json.dumps(value,ensure_ascii=False),value.get('source_hex',''),value.get('source_offset',0)))
+
+    def get(self,key,default=None):
+        row=self.db.execute('SELECT payload FROM '+self.table+' WHERE name=?',(key,)).fetchone()
+        return json.loads(row[0]) if row else default
+
+    def __getitem__(self,key):
+        row=self.db.execute('SELECT payload FROM '+self.table+' WHERE name=?',(key,)).fetchone()
+        if row is None:raise KeyError(key)
+        return json.loads(row[0])
+
+    def __contains__(self,key):
+        return self.db.execute('SELECT 1 FROM '+self.table+' WHERE name=?',(key,)).fetchone() is not None
+
+    def __len__(self):
+        return self.db.execute('SELECT count(*) FROM '+self.table).fetchone()[0]
+
+    def __iter__(self):
+        for name, in self.db.execute('SELECT name FROM '+self.table+' ORDER BY rowid'):yield name
+
+    def items(self):
+        for name,payload in self.db.execute('SELECT name,payload FROM '+self.table+' ORDER BY rowid'):
+            yield name,json.loads(payload)
+
+    def values(self,ordered=False):
+        for payload, in self.db.execute('SELECT payload FROM '+self.table+' ORDER BY '+('source,offset' if ordered else 'rowid')):
+            yield json.loads(payload)
+
+    def update(self,values):
+        for name,value in values.items():self[name]=value
+
+
+class MetadataList(object):
+    def __init__(self,db,name):
+        self.db,self.table=db,quote_identifier(name)
+        db.execute('CREATE TABLE '+self.table+' (payload TEXT,fingerprint TEXT)')
+        db.execute('CREATE INDEX '+quote_identifier(name+'_fingerprint')+' ON '+self.table+' (fingerprint)')
+
+    def fingerprint(self,value):
+        payload=json.dumps(value,ensure_ascii=False,sort_keys=True)
+        return payload,hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+    def append(self,value):
+        self.db.execute('INSERT INTO '+self.table+' VALUES (?,?)',self.fingerprint(value))
+
+    def extend(self,values):
+        for value in values:self.append(value)
+
+    def __iter__(self):
+        for payload, in self.db.execute('SELECT payload FROM '+self.table+' ORDER BY rowid'):yield json.loads(payload)
+
+    def __contains__(self,value):
+        return self.db.execute('SELECT 1 FROM '+self.table+' WHERE fingerprint=? LIMIT 1',(self.fingerprint(value)[1],)).fetchone() is not None
+
+    def __len__(self):
+        return self.db.execute('SELECT count(*) FROM '+self.table).fetchone()[0]
 
 
 def database_sqlstates(error):
@@ -616,12 +701,15 @@ class FrozenHTML(HTMLParser):
 
 
 class Bundle:
-    def __init__(self, folder, cell, username, reference_file=None, write_file=None):
+    def __init__(self, folder, cell, username, reference_file=None, write_file=None, file_catalog=None, issues=None):
         self.folder, self.cell, self.username = folder, os.path.realpath(cell), username
         self.files, self.issues, self.image_cache, self.attachments_by_no = {}, [], {}, {}
+        if file_catalog is not None:self.files=file_catalog
+        if issues is not None:self.issues=issues
         self.profiles = {}
         self.reference_file = reference_file
         self.write_file = write_file
+        self.checkpoint=None
         self.display_decoding = {"urlencoded_html": 0, "escaped_html": 0, "base64_signature": 0}
 
     def issue(self, kind, value):
@@ -649,6 +737,7 @@ class Bundle:
         digest=hashlib.sha256();size=0
         with open(target, "wb") as stream:
             for data in chunks:
+                if self.checkpoint:self.checkpoint()
                 if not isinstance(data,bytes):data=data.encode('utf-8')
                 stream.write(data);digest.update(data);size+=len(data)
         self.files[path] = {"bytes": size, "sha256": digest.hexdigest()}
@@ -940,7 +1029,7 @@ def reserve_archive_path(output, username):
         return path
 
 
-def run_export(config, username, output, cell=None, binary="/usr/bin/psql", progress=None, live_scope=False, pack=True, checkpoint=None, approval_since=None, reference_file=None, progress_detail=None, write_file=None):
+def run_export(config, username, output, cell=None, binary="/usr/bin/psql", progress=None, live_scope=False, pack=True, checkpoint=None, approval_since=None, reference_file=None, progress_detail=None, write_file=None, file_catalog=None, issues=None, manifest_sink=None):
     if reference_file is not None and pack:
         raise SafeError("Direct source references require an unpacked SSH export.")
     if write_file is not None and (pack or reference_file is None):
@@ -966,7 +1055,8 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
         notify("Snapshot checked: %d active documents, %d historical versions." %
                (counts["approval_document"], counts["approval_document_backup"]))
         if not direct:shutil.rmtree(work)
-        bundle = Bundle(folder, cell, username, reference_file,write_file)
+        bundle = Bundle(folder, cell, username, reference_file,write_file,file_catalog,issues)
+        bundle.checkpoint=checkpoint
         notify("Copying attachments and building offline HTML...")
         # The live bridge already authenticated the employee. An employee with
         # no approval profile/documents must still be able to archive mail.
@@ -975,12 +1065,14 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
             with open(os.path.join(folder,'catalog.json'),'wb') as stream:
                 digest=hashlib.sha256();size=0
                 def emit(payload):
+                    if checkpoint:checkpoint()
                     stream.write(payload);digest.update(payload)
                     return len(payload)
                 size+=emit(b'{"items":[')
                 for item in iter_render_bundle(bundle,rows,counts,live_scope,checkpoint,progress_detail):
                     if item_count:size+=emit(b',')
-                    size+=emit(json.dumps(item,ensure_ascii=False).encode('utf-8'));item_count+=1
+                    for chunk in byte_chunks(json_chunks(item)):size+=emit(chunk)
+                    item_count+=1
                 size+=emit(b']}')
             bundle.files['catalog.json']={'bytes':size,'sha256':digest.hexdigest()}
             if isinstance(rows,DiskRows):rows.close()
@@ -1012,14 +1104,20 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
                     "warnings": warnings, "files": bundle.files,
                     "display_decoding": bundle.display_decoding}
         manifest['document_layout']='bucket-sha256-1'
-        bundle.write("issues.json", json.dumps(bundle.issues, ensure_ascii=False, indent=2))
-        payload = json.dumps({"items": [] if direct else items, "manifest": manifest}, ensure_ascii=False)
-        payload = payload.replace(u"<", u"\\u003c").replace(u">", u"\\u003e").replace(u"&", u"\\u0026")
-        with open(os.path.join(HERE, "db_archive_index.html"), "rb") as stream:
-            template = stream.read().decode("utf-8")
-        # Final manifest.json also includes the index and summary hashes.
-        manifest["files"] = dict(bundle.files)
-        bundle.write("index.html", template.replace("__DATA__", payload))
+        if progress_detail:progress_detail('metadata',0,len(bundle.files))
+        bundle.write_chunks("issues.json",json_chunks(bundle.issues))
+        if direct:
+            # Windows builds the final index. Do not embed a second manifest.
+            bundle.write('index.html',u'<!doctype html><meta charset="utf-8"><p>Windows 인덱스 생성 대기</p>')
+        else:
+            with open(os.path.join(HERE, "db_archive_index.html"), "rb") as stream:
+                prefix,suffix=stream.read().decode('utf-8').split('__DATA__')
+            def index_chunks():
+                yield prefix
+                for chunk in byte_chunks(json_chunks({'items':items,'manifest':manifest})):
+                    yield chunk.replace(b'<',b'\\u003c').replace(b'>',b'\\u003e').replace(b'&',b'\\u0026')
+                yield suffix
+            bundle.write_chunks('index.html',index_chunks())
         summary = ("SEGIO_DB_EXPORT_V1\nActive documents: %d\nHistorical document versions: %d\n"
                    "Attachment records: %d\nFiles copied: %d\nIssues: %d\n"
                    "URL-decoded HTML layers: %d\nEntity-decoded HTML layers: %d\nBase64 signatures displayed: %d\n"
@@ -1027,14 +1125,16 @@ def run_export(config, username, output, cell=None, binary="/usr/bin/psql", prog
                    "State: collected_with_warnings\nAccount deletion verified: false\n"
                    "END_SEGIO_DB_EXPORT_V1\n" %
                    (counts["approval_document"], counts["approval_document_backup"], counts["approval_attach_info"],
-                    len([p for p in bundle.files if "/attachments/" in p]), len(bundle.issues),
+                    sum(1 for p in bundle.files if "/attachments/" in p), len(bundle.issues),
                     bundle.display_decoding["urlencoded_html"], bundle.display_decoding["escaped_html"],
                     bundle.display_decoding["base64_signature"]))
         bundle.write("export-summary.txt", summary)
-        manifest["files"] = dict(bundle.files)
         # The manifest cannot hash itself.
         with open(os.path.join(folder, "manifest.json"), "wb") as stream:
-            stream.write(json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
+            for chunk in byte_chunks(json_chunks(manifest)):
+                if checkpoint:checkpoint()
+                stream.write(chunk)
+        if manifest_sink is not None:manifest_sink(manifest)
         if not pack:
             success = True
             return folder, None

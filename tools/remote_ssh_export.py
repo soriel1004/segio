@@ -16,13 +16,13 @@ from email.parser import Parser
 from email.utils import parsedate_tz, mktime_tz
 from optparse import OptionParser
 
-from export_approval_db import run_export, approval_cutoff
+from export_approval_db import run_export, approval_cutoff,MetadataStore
 from export_schema_from_segio_config import SafeError
 from live_export_worker import (read_json, write_json, check_user, mail_path, inventory,
                                 fingerprint, file_identity, failure_details as worker_failure_details)
 
 PROTOCOL = 'segio-ssh-archive/1'
-REVISION = 'ssh-streamed-records-5'
+REVISION = 'ssh-disk-metadata-6'
 
 
 def memory_info():
@@ -336,8 +336,9 @@ def prepare(root, apply_limits=False):
     status_path = os.path.join(root, 'status.json')
     stage = 'initializing'
     references, reference_checks = {}, []
+    metadata_store=None;exported=[None]
     budget=WorkBudget(root);last_report=[0];current={'phase':'query'}
-    spool=[None];spooled=[];spool_path=os.path.join(root,'approval-pages.bin')
+    spool=[None];spooled=[0];spool_size=0;spool_path=os.path.join(root,'approval-pages.bin')
     def reference_file(path, relative):
         identity = fingerprint(path)
         details = hash_file(path, identity,lambda _:pulse())
@@ -371,26 +372,34 @@ def prepare(root, apply_limits=False):
                 pulse();block=data[start:start+1024*1024];spool[0].write(block);digest.update(block);size+=len(block)
         details={'bytes':size,'sha256':digest.hexdigest()}
         references[relative]=dict(details,path=relative,source_hex=source_hex(spool_path),source_offset=offset)
-        spooled.append(relative)
+        spooled[0]+=1
         return details
+    def accept_manifest(value):
+        exported[0]=value
     try:
         budget.enter(apply_limits)
+        metadata_store=MetadataStore(os.path.join(root,'metadata.sqlite3'))
+        file_catalog=metadata_store.mapping('files')
+        references=metadata_store.mapping('references',ordered=True)
+        reference_checks=metadata_store.sequence('checks')
+        transfers=metadata_store.sequence('transfers')
+        issues=metadata_store.sequence('issues')
         user = request['user']
         since=approval_cutoff(request.get('since'))
         if request['approvals']:
             stage = 'database'
             status('running')
-            options=dict(cell=request['cell'],binary=request['psql'],live_scope=True,pack=False,reference_file=reference_file,checkpoint=pulse,progress_detail=detail,write_file=write_file)
+            options=dict(cell=request['cell'],binary=request['psql'],live_scope=True,pack=False,reference_file=reference_file,checkpoint=pulse,progress_detail=detail,write_file=write_file,file_catalog=file_catalog,issues=issues,manifest_sink=accept_manifest)
             if since is not None:options['approval_since']=since
             folder, archive = run_export(request['db_config'], user, root, **options)
             if spool[0] is not None:
                 spool[0].close();spool[0]=None
                 identity=fingerprint(spool_path)
-                for name in spooled:references[name]['source_bytes']=identity[2]
+                spool_size=identity[2]
                 reference_checks.append({'source_hex':source_hex(spool_path),'identity':list(identity)})
             if archive:
                 os.unlink(archive)
-            manifest = read_json(os.path.join(folder, 'manifest.json'), None)
+            manifest = exported[0] if exported[0] is not None else read_json(os.path.join(folder, 'manifest.json'), None)
         else:
             folder = os.path.join(root, 'bundle')
             os.mkdir(folder, 0o700)
@@ -403,8 +412,15 @@ def prepare(root, apply_limits=False):
                 'coverage': [], 'warnings': [], 'snapshot_rows': {}}
             for name in ('catalog.json', 'index.html'):
                 manifest['files'][name] = hash_file(os.path.join(folder, name))
-        write_json(os.path.join(root, 'approval-check.json'), reference_checks)
-        transfers, sources = sorted(references.values(),key=lambda item:(item['source_hex'],item.get('source_offset',0))), []
+        if manifest['files'] is not file_catalog:
+            file_catalog.update(manifest['files']);manifest['files']=file_catalog
+        current.update(phase='metadata');budget.phase='metadata';pulse()
+        write_json(os.path.join(root, 'approval-check.json'), reference_checks,checkpoint=pulse)
+        for entry in references.values(ordered=True):
+            pulse()
+            if entry['source_hex']==source_hex(spool_path) and 'source_offset' in entry:entry['source_bytes']=spool_size
+            transfers.append(entry)
+        sources=[]
         if request['mail']:
             stage = 'mail'
             status('running', files_done=0)
@@ -412,31 +428,34 @@ def prepare(root, apply_limits=False):
             transfers.extend(mail_transfers)
             for source in sources:
                 manifest['files'][source['path']]=dict((key,source[key]) for key in ('bytes','sha256'))
-            write_json(os.path.join(root, 'mail-check.json'), identities)
+            write_json(os.path.join(root, 'mail-check.json'), identities,checkpoint=pulse)
             mail_dir = os.path.join(folder, 'mail')
             os.mkdir(mail_dir, 0o700)
             source_file = os.path.join(mail_dir, 'sources.json')
-            write_json(source_file, {'user': user, 'sources': sources, 'raw_files_complete': True})
+            write_json(source_file, {'user': user, 'sources': sources, 'raw_files_complete': True},checkpoint=pulse)
             manifest['files']['mail/sources.json'] = hash_file(source_file)
+        stage='metadata';budget.phase='metadata';current.update(phase='metadata')
+        status('running',phase='metadata')
         manifest['finished_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         manifest['ssh_export'] = {'protocol': PROTOCOL, 'job': os.path.basename(root),
             'approvals': request['approvals'], 'mail': request['mail'], 'authentication': 'administrator_ssh',
             'source_transfer': 'direct-mail-and-attachments/1'}
-        if spooled:manifest['ssh_export']['derived_storage']='sequential-ranges/1'
+        if spooled[0]:manifest['ssh_export']['derived_storage']='sequential-ranges/1'
         if since is not None:manifest['ssh_export']['since']=since
         manifest['warnings'].append('Export requested by SSH administrator; employee password was not verified.')
         manifest['counts']['mail_files'] = len(sources)
         manifest['coverage'].append({'kind': 'mail', 'status': 'direct_source_transfer', 'files': len(sources)})
         manifest_path = os.path.join(folder, 'manifest.json')
-        write_json(manifest_path, manifest)
-        for name in sorted(manifest['files']):
+        write_json(manifest_path, manifest,checkpoint=pulse)
+        for name in manifest['files']:
+            pulse()
             if name.startswith('mail/raw/') or name in references:
                 continue
             transfers.append(dict(manifest['files'][name], path=name,
                                   source_hex=source_hex(os.path.join(folder, *name.split('/')))))
         transfers.append(dict(hash_file(manifest_path), path='manifest.json', source_hex=source_hex(manifest_path)))
         write_json(os.path.join(root, 'transfer.json'), {'protocol': PROTOCOL, 'user': user,
-                   'job': os.path.basename(root), 'files': transfers})
+                   'job': os.path.basename(root), 'files': transfers},checkpoint=pulse)
         status('ready', files=len(transfers), bytes=sum(item['bytes'] for item in transfers))
     except Exception as exc:
         code, diagnostic = failure_details(exc, stage)
@@ -446,7 +465,9 @@ def prepare(root, apply_limits=False):
         if spool[0] is not None:
             try:spool[0].close()
             except (IOError,OSError):pass
-        budget.close()
+        try:
+            if metadata_store is not None:metadata_store.close()
+        finally:budget.close()
 
 
 def verify_sources(root):
