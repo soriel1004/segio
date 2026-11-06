@@ -26,6 +26,7 @@ from .compact_mail import build_compact_catalog, digest_file
 from .db_client import DBCollector, publish_local, safe_member
 from .web import Cancelled, CollectionError
 from .progress import Reporter, LABELS
+from .ssh_transfer import TransferRecovery,TransferFault
 
 PROTOCOL = 'segio-ssh-archive/1'
 CHECK_PROTOCOL = 'segio-ssh-check/1'
@@ -164,13 +165,14 @@ class VerifiedHostPolicy(paramiko.MissingHostKeyPolicy):
         os.chmod(self.path,0o600)
 
 
-class SSHCollector:
+class SSHCollector(TransferRecovery):
     def __init__(self, config: SSHConfig, log=lambda _:None, confirm_host=None, progress=None):
         self.config, self.log, self.confirm_host = config, log, confirm_host
         self.client = self.sftp = None
         self.phase, self.remote = 'SSH 연결', None
         self.retired=[]
         self.report=Reporter(progress)
+        self.reconnect_transfer=None
 
     def begin_stage(self,stage,detail=''):
         self.phase=LABELS[stage]
@@ -291,6 +293,7 @@ class SSHCollector:
         except (paramiko.SSHException,OSError,socket.timeout):
             raise CollectionError('SSH 연결 확인에 실패했습니다. 서버 주소·포트·네트워크를 확인하세요. [SSH_CONNECTION_OR_IO]') from None
         finally:
+            self.reconnect_transfer=None
             password=''
             self.close_connections()
 
@@ -508,8 +511,8 @@ class SSHCollector:
             self.config.cancel.wait(1)
         raise CollectionError('SSH 서버 추출 준비 대기 시간이 초과됐습니다.')
 
-    def transfer(self,folder):
-        metadata = self.read_json(self.remote+'/transfer.json')
+    def transfer_once(self,folder):
+        metadata = self.io('remote_metadata',self.read_json,self.remote+'/transfer.json')
         if (metadata.get('protocol') != PROTOCOL or metadata.get('user') != self.config.username or
                 metadata.get('job') != self.remote.rsplit('/',1)[1] or not isinstance(metadata.get('files'),list)):
             raise CollectionError('SSH 추출 대상 또는 작업 번호가 일치하지 않습니다.')
@@ -535,58 +538,79 @@ class SSHCollector:
             cursor = folder
             for part in path.parts:
                 cursor = cursor/part
-                if cursor.is_symlink():
+                if self.io('local_stat',cursor.is_symlink):
                     raise CollectionError('SSH 저장 폴더 안의 심볼릭 링크는 사용할 수 없습니다.')
             seen.add(folded)
             records.append((item,source,target))
             total += item['bytes']
-        existing = sum(min(target.stat().st_size,item['bytes']) for item,_,target in records if target.is_file())
-        if total-existing+128*1024*1024 > shutil.disk_usage(folder).free:
+        existing = self.io('local_stat',lambda:sum(min(target.stat().st_size,item['bytes']) for item,_,target in records if target.is_file()))
+        if total-existing+128*1024*1024 > self.io('local_space',shutil.disk_usage,folder).free:
             raise CollectionError('원본을 저장할 Windows 디스크 공간이 부족합니다.')
         done, logged = 0, 0.0
         self.report('transfer',0,total,'bytes',force=True)
-        for item,source,target in records:
+        for number,(item,source,target) in enumerate(records,1):
             self.checkpoint()
-            target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-            size = target.stat().st_size if target.exists() else 0
-            if target.is_file() and size==item['bytes']:
+            self.transfer_context.update(file_number=number,files_total=len(records),completed_bytes=done,total_bytes=total,
+                                         file_bytes=item['bytes'],file_completed_bytes=0)
+            self.io('local_mkdir',target.parent.mkdir,parents=True,exist_ok=True,mode=0o700)
+            size = self.io('local_stat',lambda:target.stat().st_size if target.exists() else 0)
+            if self.io('local_stat',target.is_file) and size==item['bytes']:
                 self.report('transfer',done,total,'bytes','이미 받은 파일 SHA-256 검사 중',force=size>=8*1024**2)
-                if digest_file(target,self.checkpoint)=={'bytes':item['bytes'],'sha256':item['sha256']}:
+                if self.io('local_hash',digest_file,target,self.checkpoint)=={'bytes':item['bytes'],'sha256':item['sha256']}:
                     done += size
                     self.report('transfer',done,total,'bytes','검증된 파일 이어받기',force=done==total)
                     continue
-            if target.exists() and size>=item['bytes']:
-                target.unlink()
+            if self.io('local_stat',target.exists) and size>=item['bytes']:
+                self.io('local_remove',target.unlink)
                 size=0
-            attributes = self.sftp.lstat(source)
+            attributes = self.io('remote_stat',self.sftp.lstat,source)
             offset=item.get('source_offset',0)
             if not stat.S_ISREG(attributes.st_mode) or attributes.st_size != item.get('source_bytes',item['bytes']):
                 raise CollectionError('서버 원본이 변경됐습니다. 이어받기를 해제해 새로 추출하세요. [SSH_SOURCE_CHANGED]')
-            with self.sftp.open(source,'rb') as incoming, target.open('ab') as outgoing:
-                incoming.seek(offset+size)
-                done += size
+            incoming=outgoing=None
+            try:
+                incoming=self.io('remote_open',self.sftp.open,source,'rb')
+                outgoing=self.io('local_open',target.open,'ab')
+                self.io('remote_read',incoming.seek,offset+size)
+                done+=size
+                self.transfer_context.update(completed_bytes=done,file_completed_bytes=size)
                 while size<item['bytes']:
                     self.checkpoint()
-                    # Bound both the read queue and memory. Prefetching an
-                    # entire 40GB file would build a huge request list.
                     end=min(size+1024*1024,item['bytes'])
                     chunks=[(offset+position,min(32768,end-position)) for position in range(size,end,32768)]
-                    blocks=incoming.readv(chunks,max_concurrent_prefetch_requests=8)
-                    for (_,expected_size),block in zip(chunks,blocks):
+                    if self.sequential_reads or item['bytes']<=1024*1024:
+                        blocks=(self.io('remote_read',incoming.read,length) for _,length in chunks)
+                    else:
+                        blocks=self.io('remote_read',incoming.readv,chunks,max_concurrent_prefetch_requests=8)
+                    for _,expected_size in chunks:
                         self.checkpoint()
+                        try:block=self.io('remote_read',next,blocks)
+                        except StopIteration:block=b''
                         if len(block)!=expected_size:
-                            raise CollectionError('SSH 파일 전송이 중간에 끝났습니다. 다시 실행하면 이어받습니다.')
-                        outgoing.write(block)
-                        size += len(block)
-                        done += len(block)
+                            # A dropped connection can also surface as a short read.
+                            # Recovery verifies the source before resuming the prefix.
+                            raise TransferFault('remote_read',EOFError('Incomplete remote read'))
+                        written=self.io('local_write',outgoing.write,block)
+                        if written!=len(block):
+                            raise TransferFault('local_write',OSError('Incomplete local write'))
+                        size+=len(block);done+=len(block)
+                        self.transfer_context.update(completed_bytes=done,file_completed_bytes=size)
                         if time.monotonic()-logged>2:
                             self.log(f'SFTP 전송 {done/1024**3:.2f} / {total/1024**3:.2f} GiB · {100*done/max(total,1):.1f}%')
                             logged=time.monotonic()
-                    self.report('transfer',done,total,'bytes','SFTP 전송 중')
+                    self.report('transfer',done,total,'bytes','SFTP 전송 중 · 순차 읽기' if self.sequential_reads else 'SFTP 전송 중')
+                self.io('local_flush',outgoing.flush)
+                self.io('local_close',outgoing.close);outgoing=None
+                self.io('remote_close',incoming.close);incoming=None
+            finally:
+                for handle in (outgoing,incoming):
+                    if handle:
+                        try:handle.close()
+                        except Exception:pass
             self.report('transfer',done,total,'bytes','수신 파일 SHA-256 검사 중',force=item['bytes']>=8*1024**2)
-            if digest_file(target,self.checkpoint) != {'bytes':item['bytes'],'sha256':item['sha256']}:
+            if self.io('local_hash',digest_file,target,self.checkpoint) != {'bytes':item['bytes'],'sha256':item['sha256']}:
                 raise CollectionError('내려받은 파일의 SHA-256이 일치하지 않습니다. 완료로 처리하지 않았습니다. [SSH_FILE_HASH_MISMATCH]')
-        manifest=json.loads((folder/'manifest.json').read_text(encoding='utf-8'))
+        manifest=json.loads(self.io('local_manifest',(folder/'manifest.json').read_text,encoding='utf-8'))
         snapshot=manifest.get('ssh_export',{})
         if snapshot.get('since')!=getattr(self,'since',None):
             raise CollectionError('서버의 추가 백업 날짜가 요청과 다릅니다. 최신 tools를 사용하세요. [SSH_INCREMENTAL_SCOPE_MISMATCH]')
@@ -606,7 +630,7 @@ class SSHCollector:
             self.checkpoint()
             self.begin_stage('connect')
             self.connect(password)
-            password=''
+            self.reconnect_transfer=lambda:self.connect(password)
             output=self.config.output.expanduser().resolve()
             from .backup_update import selection_output
             cleanup_output=selection_output(output) if (output/'manifest.json').is_file() else output
@@ -614,6 +638,7 @@ class SSHCollector:
             identity={key:getattr(self.config,key) for key in ('host','port','ssh_user','username','db_config','cell','mail_template','approvals','mail')}
             from .backup_update import workspace,load,save,merge,publish,named_folder
             output,cache,contents,base,plan=workspace(output,self.config.username,identity,self.config.resume)
+            self.transfer_failure_path=cache/'transfer-failure.json'
             self.since=plan.get('since')
             origin={key:value for key,value in identity.items() if key not in ('approvals','mail')}
             if base and load(base/'manifest.json').get('backup_origin',origin)!=origin:
@@ -633,6 +658,7 @@ class SSHCollector:
                 self.transfer(contents)
                 self.begin_stage('verify')
                 self.execute('verify')
+                self.reconnect_transfer=None;password=''
                 local_manifest=load(contents/'manifest.json')
                 local_manifest['collector_version']=__version__
                 local_manifest['backup_origin']=origin
@@ -713,5 +739,6 @@ class SSHCollector:
         except Exception:
             raise CollectionError(self.phase+' 중 처리 오류가 발생했습니다. [SSH_PROCESSING_ERROR]') from None
         finally:
+            self.reconnect_transfer=None
             password=''
             self.close_connections()

@@ -11,6 +11,7 @@ import tempfile
 import subprocess
 import sys
 import io
+import errno
 import types
 from contextlib import redirect_stdout
 import threading
@@ -30,6 +31,111 @@ from ssh_fixture import SSHServer
 
 
 class SSHArchiveTests(unittest.TestCase):
+    def test_disconnect_at_99_percent_reconnects_and_resumes_same_capture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config,_=self.fixture(root)
+            payload=b'From synthetic@example.test\nSubject: Near complete\n\n'+b'x'*(4*1024*1024)
+            (root/'home/e/employee/mbox/large.mbox').write_bytes(payload)
+            logs=[];collector=SSHCollector(config,log=logs.append,confirm_host=lambda *_:True)
+            call=collector.io;failed=[False];positions=[]
+            def observed(operation,callback,*args,**kwargs):
+                context=collector.transfer_context
+                if operation=='remote_read' and context.get('file_bytes')==len(payload):
+                    if not failed[0] and context.get('file_completed_bytes',0)>=len(payload)*.99:
+                        failed[0]=True;collector.client.get_transport().close()
+                        def broken():raise ConnectionResetError(errno.ECONNRESET,'PRIVATE_REMOTE_PATH')
+                        return call(operation,broken)
+                    if failed[0] and getattr(callback,'__name__','')=='seek':positions.append(args[0])
+                return call(operation,callback,*args,**kwargs)
+            collector.io=observed
+            with patch.object(helper,'run_export',side_effect=synthetic_export):
+                result=collector.run('SYNTHETIC_SSH_PASSWORD')
+            self.assertTrue(failed[0]);self.assertTrue(positions)
+            self.assertGreaterEqual(min(positions),len(payload)*.99)
+            self.assertEqual(server.actions.count('prepare'),1)
+            self.assertTrue(collector.sequential_reads);self.assertIsNone(collector.reconnect_transfer)
+            self.assertTrue(verify_archive(result)['ok'])
+            self.assertIn(payload,[p.read_bytes() for p in (result/'mail/raw').iterdir()])
+            self.assertNotIn('SYNTHETIC_SSH_PASSWORD','\n'.join(logs));self.assertNotIn('PRIVATE_REMOTE_PATH','\n'.join(logs))
+
+    def test_short_read_recovers_only_after_source_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config,_=self.fixture(root)
+            payload=b'From a@example.test\nSubject: Short read\n\n'+b'x'*(2*1024*1024)
+            (root/'home/e/employee/mbox/large.mbox').write_bytes(payload)
+            collector=SSHCollector(config,confirm_host=lambda *_:True);call=collector.io;failed=[False]
+            def observed(operation,callback,*args,**kwargs):
+                if operation=='remote_read' and getattr(callback,'__name__','')=='next' and collector.transfer_context.get('file_completed_bytes',0)>32768 and not failed[0]:
+                    failed[0]=True
+                    return b''
+                return call(operation,callback,*args,**kwargs)
+            collector.io=observed
+            with patch.object(helper,'run_export',side_effect=synthetic_export):
+                result=collector.run('SYNTHETIC_SSH_PASSWORD')
+            self.assertTrue(failed[0]);self.assertTrue(collector.sequential_reads)
+            self.assertEqual(server.actions.count('prepare'),1)
+            self.assertGreaterEqual(server.actions.count('verify'),2)
+            self.assertIn(payload,[p.read_bytes() for p in (result/'mail/raw').iterdir()])
+            self.assertTrue(verify_archive(result)['ok'])
+
+    def test_local_disk_error_is_not_retried_and_safe_diagnostic_keeps_partial_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config,_=self.fixture(root)
+            payload=b'From synthetic@example.test\nSubject: Disk fixture\n\n'+b'x'*(2*1024*1024)
+            (root/'home/e/employee/mbox/large.mbox').write_bytes(payload)
+            collector=SSHCollector(config,confirm_host=lambda *_:True);call=collector.io
+            def observed(operation,callback,*args,**kwargs):
+                if operation=='local_write' and collector.transfer_context.get('file_bytes')==len(payload) and collector.transfer_context.get('file_completed_bytes',0)>0:
+                    def full():raise OSError(errno.ENOSPC,'PRIVATE_LOCAL_PATH_AND_CONTENT')
+                    return call(operation,full)
+                return call(operation,callback,*args,**kwargs)
+            collector.io=observed
+            with patch.object(helper,'run_export',side_effect=synthetic_export),self.assertRaisesRegex(CollectionError,'WINDOWS_DISK_FULL'):
+                collector.run('SYNTHETIC_SSH_PASSWORD')
+            diagnostic=json.loads(collector.transfer_failure_path.read_text())
+            self.assertEqual(diagnostic['operation'],'local_write');self.assertEqual(diagnostic['errno'],errno.ENOSPC)
+            self.assertEqual(diagnostic['retry'],0);self.assertIsNone(collector.reconnect_transfer)
+            self.assertTrue(any(0<p.stat().st_size<len(payload) for p in (config.output/'SSH-employee/mail/raw').iterdir()))
+            self.assertNotIn('PRIVATE_LOCAL_PATH_AND_CONTENT',json.dumps(diagnostic))
+            self.assertNotIn('SYNTHETIC_SSH_PASSWORD',json.dumps(diagnostic))
+
+    def test_reconnect_still_rejects_changed_server_host_key(self):
+        import paramiko
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config,_=self.fixture(root)
+            (root/'home/e/employee/mbox/large.mbox').write_bytes(b'From a@example.test\nSubject: Key\n\n'+b'x'*(2*1024*1024))
+            confirmations=[];collector=SSHCollector(config,confirm_host=lambda *args:confirmations.append(args) or True)
+            call=collector.io;failed=[False]
+            def observed(operation,callback,*args,**kwargs):
+                if operation=='remote_read' and collector.transfer_context.get('file_completed_bytes',0)>32768 and not failed[0]:
+                    failed[0]=True;server.key=paramiko.RSAKey.generate(2048);collector.client.get_transport().close()
+                    def broken():raise EOFError('PRIVATE_RAW_ERROR')
+                    return call(operation,broken)
+                return call(operation,callback,*args,**kwargs)
+            collector.io=observed
+            with patch.object(helper,'run_export',side_effect=synthetic_export),self.assertRaisesRegex(CollectionError,'SSH_HOST_KEY_CHANGED'):
+                collector.run('SYNTHETIC_SSH_PASSWORD')
+            self.assertEqual(len(confirmations),1);self.assertEqual(server.actions.count('prepare'),1)
+
+    def test_network_retries_are_bounded_and_windows_security_errors_stay_distinct(self):
+        from segio_archive.ssh_transfer import TransferFault,fault_details
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);config=SSHConfig('synthetic','root','employee',root)
+            collector=SSHCollector(config);collector.remote='/backup/.segio-ssh-'+'a'*32
+            collector.transfer_failure_path=root/'transfer-failure.json'
+            collector.reconnect_transfer=Mock();collector.read_json=Mock(return_value={'protocol':helper.PROTOCOL,'state':'ready'})
+            collector.execute=Mock()
+            collector.transfer_once=Mock(side_effect=TransferFault('remote_read',TimeoutError(errno.ETIMEDOUT,'PRIVATE_ERROR')))
+            with patch.object(config.cancel,'wait',return_value=False),self.assertRaisesRegex(CollectionError,'SSH_TRANSFER_INTERRUPTED'):
+                collector.transfer(root)
+            self.assertEqual(collector.transfer_once.call_count,4);self.assertEqual(collector.reconnect_transfer.call_count,3)
+            self.assertEqual(json.loads(collector.transfer_failure_path.read_text())['retry'],3)
+            for number,code in ((225,'WINDOWS_SECURITY_BLOCKED'),(226,'WINDOWS_SECURITY_BLOCKED'),(32,'WINDOWS_FILE_LOCKED')):
+                error=OSError(errno.EACCES,'PRIVATE_ERROR');error.winerror=number
+                actual,_,retry,details=fault_details(TransferFault('local_write',error))
+                self.assertEqual(actual,code);self.assertFalse(retry);self.assertEqual(details['winerror'],number)
+
     def test_work_budget_stops_disconnected_cancelled_and_memory_starved_jobs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);budget=helper.WorkBudget(str(root))
