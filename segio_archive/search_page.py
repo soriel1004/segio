@@ -3,10 +3,10 @@ from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
-import sqlite3
 
 from .archive import atomic_write
 from .mail_folders import MailFolders
+from .sqlite_access import connect_readonly
 
 VERSION = 'offline-search/10'
 CHUNK_SIZE = 500
@@ -46,7 +46,7 @@ def install_search_page(root: Path, manifest=None, checkpoint=lambda: None, prog
     from .presentation import ArchivePresentation
     presentation=ArchivePresentation(root,manifest)
     versions={'active':0,'history':0}
-    with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro', uri=True)) as db:
+    with closing(connect_readonly(root/'catalog.sqlite3')) as db:
         boxes=folders.boxes(db)
         approvals=presentation.load_approval_folders(db)
         approval_boxes=approvals.boxes(db)

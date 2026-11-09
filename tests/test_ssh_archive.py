@@ -45,7 +45,7 @@ class SSHArchiveTests(unittest.TestCase):
                 collector.run('SYNTHETIC_SSH_PASSWORD')
             folder=config.output/'SSH-employee'
             detail=json.loads((folder/'processing-failure.json').read_text())
-            self.assertEqual(detail['stage'],'mail');self.assertEqual(detail['site']['function'],'build_portable_mail')
+            self.assertEqual(detail['stage'],'mail');self.assertEqual(detail['site']['function'],'connect_readonly')
             self.assertEqual(detail['exception_type'],'OperationalError')
             self.assertNotIn('PRIVATE_',json.dumps(detail));self.assertNotIn('PRIVATE_',str(caught.exception))
             self.assertTrue(any(p.read_bytes()==original for p in (folder/'mail/raw').iterdir()))

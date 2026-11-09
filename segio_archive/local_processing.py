@@ -24,7 +24,7 @@ def failure_details(error,stage,event=None):
         if event.get('unit') in ('messages','bytes','records','files','steps'):value['unit']=event['unit']
     trace=error.__traceback__
     modules={'portable_mail','compact_mail','backup_update','search_page','index_maintenance',
-             'archive','ssh_client','mail_import','presentation'}
+             'archive','ssh_client','mail_import','presentation','sqlite_access'}
     while trace:
         code=trace.tb_frame.f_code;module=Path(code.co_filename).stem
         if module in modules:

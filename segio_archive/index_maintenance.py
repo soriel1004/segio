@@ -10,6 +10,7 @@ from .approval_folders import compact_record
 from .archive import atomic_write
 from .compact_mail import digest_file
 from .web import CollectionError
+from .sqlite_access import connect_readonly
 
 THRESHOLD=64*1024*1024
 
@@ -34,7 +35,7 @@ def compact_approval_index(root, manifest, checkpoint=lambda:None, progress=None
         committed=False
         try:
             stage=work/'stage';stage.mkdir()
-            with closing(sqlite3.connect(source.as_uri()+'?mode=ro',uri=True)) as old, closing(sqlite3.connect(stage/'catalog.sqlite3')) as new:
+            with closing(connect_readonly(source)) as old, closing(sqlite3.connect(stage/'catalog.sqlite3')) as new:
                 schema=old.execute("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type='table' DESC").fetchall()
                 tables=[(name,sql) for kind,name,sql in schema if kind=='table']
                 total=old.execute('SELECT count(*) FROM document_records').fetchone()[0] if any(name=='document_records' for name,_ in tables) else 0

@@ -21,6 +21,7 @@ from .archive import atomic_write, safe_name
 from .compact_mail import digest_file
 from .mail_import import decode_bytes, header_text
 from .web import CollectionError
+from .sqlite_access import connect_readonly
 from email.errors import MessageError
 
 VERSION = 'static-mail/1'
@@ -346,7 +347,7 @@ def build_portable_mail(root: Path, manifest=None, checkpoint=lambda:None, log=l
     from .db_client import safe_member
     count=0
     issues=[]
-    with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro',uri=True)) as db:
+    with closing(connect_readonly(root/'catalog.sqlite3')) as db:
         db.row_factory=sqlite3.Row
         total=db.execute('SELECT count(*) FROM mail_records').fetchone()[0]
         report('mail',0,total,'messages','본문·첨부 처리',force=True)

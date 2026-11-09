@@ -14,6 +14,7 @@ from .compact_mail import digest_file, mbox_spans
 from .db_client import safe_member
 from .portable_mail import VERSION as MAIL_VERSION, page_path
 from .web import Cancelled, CollectionError
+from .sqlite_access import connect_readonly
 
 WORK = '.segio-edit'
 PROTOCOL = 'segio-local-delete/1'
@@ -102,7 +103,7 @@ def preview(root, ids):
         local(root,name)
     checked(root,'index.html',files)
     checked(root,'catalog.sqlite3',files)
-    with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro',uri=True)) as db:
+    with closing(connect_readonly(root/'catalog.sqlite3')) as db:
         rows=selected(db,ids)
         sources=set()
         retained_sources=set()
@@ -250,7 +251,7 @@ def _delete_items(root, ids, revision, checkpoint, report, fault):
                 target=local(stage,name)
                 target.parent.mkdir(parents=True,exist_ok=True)
                 shutil.copy2(source,target)
-        with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro',uri=True)) as original,closing(sqlite3.connect(stage/'catalog.sqlite3')) as db:
+        with closing(connect_readonly(root/'catalog.sqlite3')) as original,closing(sqlite3.connect(stage/'catalog.sqlite3')) as db:
             original.backup(db)
             rows=selected(db,ids)
             deleted=set(ids)

@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from .mail_import import header_text, decode_bytes, PARSE_LIMIT
 from .web import CollectionError
 from .approval_folders import compact_record
+from .sqlite_access import connect_readonly
 
 
 def digest_file(path, checkpoint=lambda: None, progress=None):
@@ -176,7 +177,7 @@ def search(root: Path, query='', kind='', page=0, mailbox='', version='', approv
     if mailbox and kind!='approval':
         where+=" AND kind='mail' AND mailbox_key(folders)=?"
         parameters.append(mailbox)
-    with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro', uri=True)) as db:
+    with closing(connect_readonly(root/'catalog.sqlite3')) as db:
         from .presentation import ArchivePresentation
         presentation=ArchivePresentation(root)
         approvals=presentation.load_approval_folders(db)
@@ -208,7 +209,7 @@ def search(root: Path, query='', kind='', page=0, mailbox='', version='', approv
 
 def mail_record(root: Path, identity: str):
     from .db_client import safe_member
-    with closing(sqlite3.connect((root/'catalog.sqlite3').as_uri()+'?mode=ro', uri=True)) as db:
+    with closing(connect_readonly(root/'catalog.sqlite3')) as db:
         db.row_factory = sqlite3.Row
         row = db.execute('SELECT m.*,i.title FROM mail_records m JOIN items i ON i.id=m.id WHERE m.id=?', (identity,)).fetchone()
     if row is None:

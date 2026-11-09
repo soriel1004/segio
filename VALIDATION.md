@@ -1,5 +1,15 @@
 # 검증 결과
 
+## v0.4.28 UNC 공유 폴더의 SQLite URI authority 오류
+
+업로드한 processing-failure.json은 v0.4.27 / mail / OperationalError / sqlite_errorcode=1 / portable_mail.build_portable_mail:349입니다. 사진의 백업 위치는 Windows UNC 공유 경로입니다. 해당 줄은 Path.as_uri()+?mode=ro 연결이며 UNC의 file://server/share URI가 기본 SQLite에서 invalid uri authority로 거부되는 것을 같은 오류 번호로 재현했습니다. 첨부 파일은 진단 데이터로만 읽었고 실행하지 않았습니다.
+
+URI의 authority를 비우고 //server/share를 파일 이름 부분에 보존하여 mode=ro 연결을 유지합니다. 바로보기·검색·메일 원본 조회·검색 자료 생성·삭제 확인/삭제 준비·인덱스 정리의 7개 읽기 연결을 공통 함수로 전환했습니다. immutable/nolock 또는 읽기/쓰기 연결로 우회하지 않습니다. URI 예약 문자와 Unicode를 보존하며 누락 파일을 생성하지 않고 실제 쓰기도 거부하는 것을 검사합니다.
+
+로컬 SQLite에서 기존 UNC URI의 SQLITE_ERROR(1) 재현, 수정 URI의 실제 DB 읽기/쓰기 거부/파일 미생성을 검사했습니다. Windows CI에서는 확장 로컬 경로 읽기와 임시 SMB 공유를 통한 메일 생성·검색·인덱스 정리·선택 삭제·전체 무결성 검사를 추가합니다. 임시 공유는 합성 자료만 담으며 현재 CI 계정에 권한을 부여하고 시험 종료 시 제거합니다. 생성할 수 없는 CI 환경에서는 그 시험을 명시적으로 건너뛰고 알립니다. 운영 NAS에 직접 접속해 완료를 확인한 결과는 아닙니다.
+
+로컬 전체 203개는 실패·오류 0개, GUI/관리형 Chromium file URL 정책 12개와 Windows 전용 SMB 1개를 건너뛰었습니다. 공유 시험에 쓸 전체 메일 생성·검색·정리·삭제 자료를 추가한 최종 경로/DB 검사 5개도 실패 없이 완료했고 그중 Windows SMB 1개는 로컬에서 건너뛰었습니다. 최초 전체 실행은 로컬 소켓 샌드박스 제한을 확인하고 중단한 뒤 허용된 외부 실행으로 다시 검사했습니다. Windows 전체 및 SMB 실행 결과와 배포 파일은 GitHub Actions에서 확인합니다.
+
 ## v0.4.27 바로보기 시작 전 진단과 Windows 자동 절전 방지
 
 사용한 버전은 v0.4.26이며 사진은 SFTP 5.74/5.74 GiB 100%, 제목 색인 6,000건까지 로그가 나온 뒤 mail 단계의 준비 이벤트(현재 경과 0초, 처리량 미정)에서 SSH_PROCESSING_ERROR입니다. 개별 메일 변환 try 구간에 진입하기 전에 오류가 발생하면 기존 render-failure.json이 없고, 전송이 성공했으므로 transfer-failure.json도 없습니다. 예외 종류·SQLite 코드가 없어서 실제 원인을 화면보호기·절전·DB·메모리 중 하나로 확정하지 않습니다.
