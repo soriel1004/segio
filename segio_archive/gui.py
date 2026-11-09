@@ -12,6 +12,7 @@ from .archive import verify_archive, STATES
 from .web import CollectionError
 from . import __version__, APPLICATION_NAME
 from .progress import ProgressState
+from .power import keep_awake
 
 APP_TITLE = APPLICATION_NAME
 
@@ -232,7 +233,8 @@ class App(tk.Tk):
             from .ssh_client import SSHCollector
             collector=SSHCollector(config,lambda s:self.events.put(('log',s)),self.confirm_host,
                 progress=lambda value:self.events.put(('progress',value)))
-            path = collector.run(password)
+            with keep_awake(lambda s:self.events.put(('log',s))):
+                path = collector.run(password)
             self.events.put(("done", path))
         except CollectionError as exc:
             self.events.put(("error", str(exc)))
@@ -415,14 +417,21 @@ class App(tk.Tk):
         def checkpoint():
             if self.cancel_event.is_set():
                 raise Cancelled('메일 변환을 중단했습니다. 기존 백업 갱신을 다시 누르면 완료한 메일을 재사용합니다.')
+        latest={'stage':'validate'}
+        def progress(value):
+            latest.clear();latest.update(value)
+            self.events.put(('progress',value))
         try:
-            result=repair_local(path,checkpoint,lambda message:self.events.put(('log',message)),
-                progress=lambda value:self.events.put(('progress',value)),origin=identity)
+            with keep_awake(lambda s:self.events.put(('log',s))):
+                result=repair_local(path,checkpoint,lambda message:self.events.put(('log',message)),
+                    progress=progress,origin=identity)
             self.events.put(('archive_ready',result))
         except Cancelled as exc:
             self.events.put(('archive_error',str(exc)))
         except Exception as exc:
-            self.events.put(('archive_error',str(exc) if isinstance(exc,CollectionError) else '다운로드가 덜 끝났거나 원본을 읽지 못했습니다. SSH 암호를 입력하고 수집 시작으로 이어받으세요. ['+type(exc).__name__+']'))
+            from .local_processing import processing_failure
+            self.events.put(('archive_error',str(exc) if isinstance(exc,CollectionError) else
+                processing_failure(exc,latest['stage'],path,latest,lambda s:self.events.put(('log',s)))))
 
     def verify(self):
         path = self.select_archive()

@@ -31,6 +31,30 @@ from ssh_fixture import SSHServer
 
 
 class SSHArchiveTests(unittest.TestCase):
+    def test_failure_before_first_mail_saves_local_diagnostic_and_preserves_raw_backup(self):
+        import segio_archive.portable_mail as portable
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config,original=self.fixture(root)
+            collector=SSHCollector(config,confirm_host=lambda *_:True)
+            connect=sqlite3.connect
+            def denied(database,*args,**kwargs):
+                if str(database).endswith('catalog.sqlite3?mode=ro'):
+                    raise sqlite3.OperationalError('PRIVATE_DATABASE_PATH_AND_CONTENT')
+                return connect(database,*args,**kwargs)
+            with patch.object(helper,'run_export',side_effect=synthetic_export),patch.object(portable.sqlite3,'connect',side_effect=denied),self.assertRaisesRegex(CollectionError,'LOCAL_DATABASE_ERROR') as caught:
+                collector.run('SYNTHETIC_SSH_PASSWORD')
+            folder=config.output/'SSH-employee'
+            detail=json.loads((folder/'processing-failure.json').read_text())
+            self.assertEqual(detail['stage'],'mail');self.assertEqual(detail['site']['function'],'build_portable_mail')
+            self.assertEqual(detail['exception_type'],'OperationalError')
+            self.assertNotIn('PRIVATE_',json.dumps(detail));self.assertNotIn('PRIVATE_',str(caught.exception))
+            self.assertTrue(any(p.read_bytes()==original for p in (folder/'mail/raw').iterdir()))
+            self.assertFalse(list(config.output.glob('.segio-ssh-cache/*/transfer-failure.json')))
+            from segio_archive.backup_update import repair_local
+            self.assertEqual(repair_local(folder),folder)
+            self.assertTrue(verify_archive(folder)['ok'])
+            self.assertFalse((folder/'processing-failure.json').exists())
+
     def test_corrupt_resumed_prefix_repairs_only_that_file_and_keeps_verified_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve();server,config,_=self.fixture(root)

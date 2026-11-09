@@ -407,4 +407,6 @@ def repair_local(path,checkpoint=lambda:None,log=lambda _:None,progress=None,ori
                     'paths':list(dict.fromkeys([remote]+session.get('retired',[]))),'validated':[]}
             save(cache.parent/('cleanup-'+record['job']+'.json'),record)
             if not root.is_relative_to(cache):shutil.rmtree(cache)
+    try:(root/'processing-failure.json').unlink(missing_ok=True)
+    except OSError:pass
     return root

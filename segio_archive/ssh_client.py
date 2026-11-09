@@ -27,6 +27,7 @@ from .db_client import DBCollector, publish_local, safe_member
 from .web import Cancelled, CollectionError
 from .progress import Reporter, LABELS
 from .ssh_transfer import TransferRecovery,TransferFault
+from .local_processing import LOCAL_STAGES,processing_failure
 
 PROTOCOL = 'segio-ssh-archive/1'
 CHECK_PROTOCOL = 'segio-ssh-check/1'
@@ -173,12 +174,15 @@ class SSHCollector(TransferRecovery):
         self.retired=[]
         self.report=Reporter(progress)
         self.reconnect_transfer=None
+        self.stage='connect';self.processing_event=None;self.processing_root=None
 
     def begin_stage(self,stage,detail=''):
+        self.stage=stage;self.processing_event=None
         self.phase=LABELS[stage]
         self.report(stage,detail=detail,force=True)
 
     def forward_progress(self,event):
+        self.stage=event['stage'];self.processing_event=event
         self.phase=LABELS[event['stage']]
         if self.report.callback:
             self.report.callback(event)
@@ -647,6 +651,7 @@ class SSHCollector(TransferRecovery):
             identity={key:getattr(self.config,key) for key in ('host','port','ssh_user','username','db_config','cell','mail_template','approvals','mail')}
             from .backup_update import workspace,load,save,merge,publish,named_folder
             output,cache,contents,base,plan=workspace(output,self.config.username,identity,self.config.resume)
+            self.processing_root=contents
             self.transfer_failure_path=cache/'transfer-failure.json'
             self.since=plan.get('since')
             origin={key:value for key,value in identity.items() if key not in ('approvals','mail')}
@@ -684,6 +689,8 @@ class SSHCollector(TransferRecovery):
                 for kind in ('approvals','mail'):
                     if getattr(self.config,kind):local_manifest.setdefault('backup_completed_by_kind',{})[kind]=local_manifest['last_backup_completed_at']
                 save(contents/'manifest.json',local_manifest)
+            try:(contents/'processing-failure.json').unlink(missing_ok=True)
+            except OSError:pass
             archive=cache/'archive.zip' if plan.get('published') and self.config.make_zip and (cache/'archive.zip').is_file() else None
             if self.config.make_zip and not plan.get('published'):
                 self.begin_stage('zip')
@@ -707,6 +714,7 @@ class SSHCollector(TransferRecovery):
             self.begin_stage('publish')
             if not plan.get('published'):
                 result=publish(contents,named_folder(output,self.config.username),cache,base,plan.get('revision'))
+            self.processing_root=result
             if archive is not None:os.replace(archive,output/(result.name+'.zip'))
             self.begin_stage('cleanup')
             record={'identity':self.cleanup_identity(),'backup':str(result),
@@ -743,9 +751,13 @@ class SSHCollector(TransferRecovery):
             raise CollectionError('저장된 SSH 서버 지문과 다릅니다. 관리자에게 서버 지문을 확인하세요. [SSH_HOST_KEY_CHANGED]') from None
         except paramiko.AuthenticationException:
             raise CollectionError('서버 SSH 계정 인증에 실패했습니다. SEGIO 직원 암호가 아닌 SSH 암호·개인키를 확인하세요. [SSH_AUTH_FAILED]') from None
-        except (paramiko.SSHException,OSError,socket.timeout):
+        except (paramiko.SSHException,OSError,socket.timeout) as exc:
+            if self.stage in LOCAL_STAGES:
+                raise CollectionError(processing_failure(exc,self.stage,self.processing_root,self.processing_event,self.log)) from None
             raise CollectionError(self.phase+' 중 연결 또는 파일 처리에 실패했습니다. 서버·저장 공간을 확인한 뒤 다시 실행하면 이어받습니다. [SSH_CONNECTION_OR_IO]') from None
-        except Exception:
+        except Exception as exc:
+            if self.stage in LOCAL_STAGES:
+                raise CollectionError(processing_failure(exc,self.stage,self.processing_root,self.processing_event,self.log)) from None
             raise CollectionError(self.phase+' 중 처리 오류가 발생했습니다. [SSH_PROCESSING_ERROR]') from None
         finally:
             self.reconnect_transfer=None
