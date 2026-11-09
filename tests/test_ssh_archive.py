@@ -31,6 +31,97 @@ from ssh_fixture import SSHServer
 
 
 class SSHArchiveTests(unittest.TestCase):
+    def test_corrupt_resumed_prefix_repairs_only_that_file_and_keeps_verified_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config,_=self.fixture(root)
+            payload=b'From a@example.test\nSubject: Resumed prefix\n\n'+bytes(range(256))*(8192+1)
+            (root/'home/e/employee/mbox/large.mbox').write_bytes(payload)
+            collector=SSHCollector(config,confirm_host=lambda *_:True);transfer=collector.transfer
+            target_path=[];verified_stats={};resumed=[];call=collector.io
+            def seed(folder):
+                entries=collector.read_json(collector.remote+'/transfer.json')['files']
+                for entry in entries:
+                    target=folder/entry['path'];target.parent.mkdir(parents=True,exist_ok=True)
+                    source=server.path(os.fsdecode(bytes.fromhex(entry['source_hex'])))
+                    offset=entry.get('source_offset',0)
+                    if entry['bytes']==len(payload):
+                        target.write_bytes(b'CORRUPT_PREFIX'+payload[14:123457]);target_path.append(target)
+                    else:
+                        target.write_bytes(source.read_bytes()[offset:offset+entry['bytes']])
+                        if entry['path'].startswith(('documents/','mail/raw/')):
+                            verified_stats[target]=(target.stat().st_mtime_ns,target.read_bytes())
+                return transfer(folder)
+            def observed(operation,callback,*args,**kwargs):
+                if operation=='remote_read' and getattr(callback,'__name__','')=='seek' and collector.transfer_context.get('file_bytes')==len(payload):
+                    resumed.append(args[0])
+                return call(operation,callback,*args,**kwargs)
+            collector.transfer=seed;collector.io=observed
+            with patch.object(helper,'run_export',side_effect=synthetic_export):
+                result=collector.run('SYNTHETIC_SSH_PASSWORD')
+            self.assertEqual(resumed,[123457,0]);self.assertTrue(collector.sequential_reads)
+            self.assertEqual(server.actions.count('prepare'),1)
+            self.assertEqual(target_path[0].read_bytes(),payload)
+            for target,(modified,data) in verified_stats.items():
+                # Publishing renames the same staging folder; files are not rewritten.
+                self.assertEqual(target.stat().st_mtime_ns,modified);self.assertEqual(target.read_bytes(),data)
+            self.assertTrue(verify_archive(result)['ok'])
+
+    def test_hash_mismatch_repairs_transient_write_but_stops_persistent_corruption(self):
+        for persistent in (False,True):
+            with self.subTest(persistent=persistent),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp).resolve();server,config,_=self.fixture(root)
+                payload=b'From a@example.test\nSubject: Integrity\n\n'+b'x'*400000
+                (root/'home/e/employee/mbox/large.mbox').write_bytes(payload)
+                collector=SSHCollector(config,confirm_host=lambda *_:True);call=collector.io;corruptions=[];disconnected=[False]
+                def observed(operation,callback,*args,**kwargs):
+                    if persistent and operation=='remote_verify' and collector.transfer_context.get('hash_mismatches')==1 and not disconnected[0]:
+                        disconnected[0]=True;collector.client.get_transport().close()
+                        def dropped():raise EOFError('PRIVATE_RAW_ERROR')
+                        return call(operation,dropped)
+                    if operation=='local_write' and collector.transfer_context.get('file_bytes')==len(payload) and collector.transfer_context.get('file_completed_bytes')==0 and (persistent or not corruptions):
+                        block=args[0];args=(bytes([block[0]^1])+block[1:],)+args[1:];corruptions.append(True)
+                    return call(operation,callback,*args,**kwargs)
+                collector.io=observed
+                with patch.object(helper,'run_export',side_effect=synthetic_export):
+                    if persistent:
+                        with self.assertRaisesRegex(CollectionError,'SSH_FILE_HASH_MISMATCH') as caught:
+                            collector.run('SYNTHETIC_SSH_PASSWORD')
+                        self.assertEqual(len(corruptions),3)
+                        self.assertTrue(disconnected[0])
+                        diagnostic=json.loads(collector.transfer_failure_path.read_text())
+                        self.assertEqual(diagnostic['hash_mismatches'],3)
+                        self.assertEqual(diagnostic['code'],'SSH_FILE_HASH_MISMATCH')
+                        self.assertNotIn('SYNTHETIC_SSH_PASSWORD',json.dumps(diagnostic))
+                        self.assertNotIn('large.mbox',json.dumps(diagnostic));self.assertNotIn('large.mbox',str(caught.exception))
+                        self.assertNotIn('cleanup',server.actions)
+                    else:
+                        result=collector.run('SYNTHETIC_SSH_PASSWORD')
+                        self.assertEqual(len(corruptions),1)
+                        self.assertIn(payload,[p.read_bytes() for p in (result/'mail/raw').iterdir()])
+                        self.assertTrue(verify_archive(result)['ok'])
+                self.assertEqual(server.actions.count('prepare'),1)
+
+    def test_hash_repair_rejects_changed_source_before_resetting_cached_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config,_=self.fixture(root)
+            source=root/'home/e/employee/mbox/large.mbox'
+            payload=b'From a@example.test\nSubject: Changed source\n\n'+b'x'*400000;source.write_bytes(payload)
+            collector=SSHCollector(config,confirm_host=lambda *_:True);call=collector.io;changed=[False]
+            def observed(operation,callback,*args,**kwargs):
+                if collector.transfer_context.get('file_bytes')==len(payload):
+                    if operation=='local_write' and not changed[0]:
+                        block=args[0];args=(bytes([block[0]^1])+block[1:],)+args[1:]
+                    if operation=='local_hash' and not changed[0]:
+                        changed[0]=True;source.write_bytes(payload[:-1]+b'z')
+                        stamp=source.stat().st_mtime+5;os.utime(source,(stamp,stamp))
+                return call(operation,callback,*args,**kwargs)
+            collector.io=observed
+            with patch.object(helper,'run_export',side_effect=synthetic_export),self.assertRaisesRegex(CollectionError,'서버 메일이 변경'):
+                collector.run('SYNTHETIC_SSH_PASSWORD')
+            self.assertTrue(changed[0]);self.assertEqual(server.actions.count('prepare'),1)
+            self.assertNotIn('cleanup',server.actions)
+            self.assertTrue(any(p.stat().st_size==len(payload) for p in (config.output/'SSH-employee/mail/raw').iterdir()))
+
     def test_disconnect_at_99_percent_reconnects_and_resumes_same_capture(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve();server,config,_=self.fixture(root)

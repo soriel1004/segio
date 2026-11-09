@@ -511,58 +511,22 @@ class SSHCollector(TransferRecovery):
             self.config.cancel.wait(1)
         raise CollectionError('SSH 서버 추출 준비 대기 시간이 초과됐습니다.')
 
-    def transfer_once(self,folder):
-        metadata = self.io('remote_metadata',self.read_json,self.remote+'/transfer.json')
-        if (metadata.get('protocol') != PROTOCOL or metadata.get('user') != self.config.username or
-                metadata.get('job') != self.remote.rsplit('/',1)[1] or not isinstance(metadata.get('files'),list)):
-            raise CollectionError('SSH 추출 대상 또는 작업 번호가 일치하지 않습니다.')
-        if len(metadata['files'])>200000:
-            raise CollectionError('SSH 원본 파일 수가 제한을 초과합니다.')
-        seen, records, total = set(), [], 0
-        for item in metadata['files']:
-            path = safe_member(item['path'])
-            folded = str(path).casefold()
-            if (folded in seen or type(item.get('bytes')) is not int or item['bytes']<0 or
-                    not re.fullmatch('[a-f0-9]{64}',str(item.get('sha256',''))) or
-                    not re.fullmatch('(?:[a-f0-9]{2}){1,8192}',str(item.get('source_hex','')))):
-                raise CollectionError('SSH 파일 검증 목록이 올바르지 않습니다.')
-            source = bytes.fromhex(item['source_hex'])
-            offset=item.get('source_offset',0)
-            source_bytes=item.get('source_bytes',item['bytes'])
-            if (type(offset) is not int or type(source_bytes) is not int or offset<0 or
-                    source_bytes<0 or offset+item['bytes']>source_bytes):
-                raise CollectionError('SSH 메일 원본 범위가 올바르지 않습니다.')
-            if not source.startswith(b'/') or b'\0' in source:
-                raise CollectionError('SSH 원본 경로가 올바르지 않습니다.')
-            target = folder.joinpath(*path.parts)
-            cursor = folder
-            for part in path.parts:
-                cursor = cursor/part
-                if self.io('local_stat',cursor.is_symlink):
-                    raise CollectionError('SSH 저장 폴더 안의 심볼릭 링크는 사용할 수 없습니다.')
-            seen.add(folded)
-            records.append((item,source,target))
-            total += item['bytes']
-        existing = self.io('local_stat',lambda:sum(min(target.stat().st_size,item['bytes']) for item,_,target in records if target.is_file()))
-        if total-existing+128*1024*1024 > self.io('local_space',shutil.disk_usage,folder).free:
-            raise CollectionError('원본을 저장할 Windows 디스크 공간이 부족합니다.')
-        done, logged = 0, 0.0
-        self.report('transfer',0,total,'bytes',force=True)
-        for number,(item,source,target) in enumerate(records,1):
-            self.checkpoint()
-            self.transfer_context.update(file_number=number,files_total=len(records),completed_bytes=done,total_bytes=total,
-                                         file_bytes=item['bytes'],file_completed_bytes=0)
-            self.io('local_mkdir',target.parent.mkdir,parents=True,exist_ok=True,mode=0o700)
-            size = self.io('local_stat',lambda:target.stat().st_size if target.exists() else 0)
-            if self.io('local_stat',target.is_file) and size==item['bytes']:
+    def transfer_file(self,item,source,target,base,total,logged):
+        self.io('local_mkdir',target.parent.mkdir,parents=True,exist_ok=True,mode=0o700)
+        expected={'bytes':item['bytes'],'sha256':item['sha256']}
+        while True:
+            done=base
+            size=self.io('local_stat',lambda:target.stat().st_size if target.exists() else 0)
+            self.transfer_context.update(resumed_bytes=size,hash_mismatches=self.hash_failures.get(item['path'],0))
+            if self.io('local_stat',target.is_file) and size>=item['bytes']:
                 self.report('transfer',done,total,'bytes','이미 받은 파일 SHA-256 검사 중',force=size>=8*1024**2)
-                if self.io('local_hash',digest_file,target,self.checkpoint)=={'bytes':item['bytes'],'sha256':item['sha256']}:
-                    done += size
+                if size==item['bytes'] and self.io('local_hash',digest_file,target,self.checkpoint)==expected:
+                    done+=size
                     self.report('transfer',done,total,'bytes','검증된 파일 이어받기',force=done==total)
-                    continue
-            if self.io('local_stat',target.exists) and size>=item['bytes']:
-                self.io('local_remove',target.unlink)
-                size=0
+                    return done,logged
+                self.transfer_context.update(completed_bytes=base+size,file_completed_bytes=size)
+                self.repair_hash_mismatch(item,target)
+                continue
             attributes = self.io('remote_stat',self.sftp.lstat,source)
             offset=item.get('source_offset',0)
             if not stat.S_ISREG(attributes.st_mode) or attributes.st_size != item.get('source_bytes',item['bytes']):
@@ -608,8 +572,53 @@ class SSHCollector(TransferRecovery):
                         try:handle.close()
                         except Exception:pass
             self.report('transfer',done,total,'bytes','수신 파일 SHA-256 검사 중',force=item['bytes']>=8*1024**2)
-            if self.io('local_hash',digest_file,target,self.checkpoint) != {'bytes':item['bytes'],'sha256':item['sha256']}:
-                raise CollectionError('내려받은 파일의 SHA-256이 일치하지 않습니다. 완료로 처리하지 않았습니다. [SSH_FILE_HASH_MISMATCH]')
+            if self.io('local_hash',digest_file,target,self.checkpoint)!=expected:
+                self.repair_hash_mismatch(item,target)
+                continue
+            return done,logged
+
+    def transfer_once(self,folder):
+        metadata = self.io('remote_metadata',self.read_json,self.remote+'/transfer.json')
+        if (metadata.get('protocol') != PROTOCOL or metadata.get('user') != self.config.username or
+                metadata.get('job') != self.remote.rsplit('/',1)[1] or not isinstance(metadata.get('files'),list)):
+            raise CollectionError('SSH 추출 대상 또는 작업 번호가 일치하지 않습니다.')
+        if len(metadata['files'])>200000:
+            raise CollectionError('SSH 원본 파일 수가 제한을 초과합니다.')
+        seen, records, total = set(), [], 0
+        for item in metadata['files']:
+            path = safe_member(item['path'])
+            folded = str(path).casefold()
+            if (folded in seen or type(item.get('bytes')) is not int or item['bytes']<0 or
+                    not re.fullmatch('[a-f0-9]{64}',str(item.get('sha256',''))) or
+                    not re.fullmatch('(?:[a-f0-9]{2}){1,8192}',str(item.get('source_hex','')))):
+                raise CollectionError('SSH 파일 검증 목록이 올바르지 않습니다.')
+            source = bytes.fromhex(item['source_hex'])
+            offset=item.get('source_offset',0)
+            source_bytes=item.get('source_bytes',item['bytes'])
+            if (type(offset) is not int or type(source_bytes) is not int or offset<0 or
+                    source_bytes<0 or offset+item['bytes']>source_bytes):
+                raise CollectionError('SSH 메일 원본 범위가 올바르지 않습니다.')
+            if not source.startswith(b'/') or b'\0' in source:
+                raise CollectionError('SSH 원본 경로가 올바르지 않습니다.')
+            target = folder.joinpath(*path.parts)
+            cursor = folder
+            for part in path.parts:
+                cursor = cursor/part
+                if self.io('local_stat',cursor.is_symlink):
+                    raise CollectionError('SSH 저장 폴더 안의 심볼릭 링크는 사용할 수 없습니다.')
+            seen.add(folded)
+            records.append((item,source,target))
+            total += item['bytes']
+        existing = self.io('local_stat',lambda:sum(min(target.stat().st_size,item['bytes']) for item,_,target in records if target.is_file()))
+        if total-existing+128*1024*1024 > self.io('local_space',shutil.disk_usage,folder).free:
+            raise CollectionError('원본을 저장할 Windows 디스크 공간이 부족합니다.')
+        done, logged = 0, 0.0
+        self.report('transfer',0,total,'bytes',force=True)
+        for number,(item,source,target) in enumerate(records,1):
+            self.checkpoint()
+            self.transfer_context.update(file_number=number,files_total=len(records),completed_bytes=done,total_bytes=total,
+                                         file_bytes=item['bytes'],file_completed_bytes=0)
+            done,logged=self.transfer_file(item,source,target,done,total,logged)
         manifest=json.loads(self.io('local_manifest',(folder/'manifest.json').read_text,encoding='utf-8'))
         snapshot=manifest.get('ssh_export',{})
         if snapshot.get('since')!=getattr(self,'since',None):

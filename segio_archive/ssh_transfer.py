@@ -63,7 +63,8 @@ class TransferRecovery:
     def save_transfer_failure(self,code,details,attempt):
         value={'protocol':'segio-ssh-transfer-failure/1','collector_version':__version__,'code':code,
                'retry':attempt,'reader':'sequential' if self.sequential_reads else 'bounded-prefetch'}
-        for key in ('file_number','files_total','completed_bytes','total_bytes','file_bytes','file_completed_bytes'):
+        for key in ('file_number','files_total','completed_bytes','total_bytes','file_bytes','file_completed_bytes',
+                    'resumed_bytes','hash_mismatches'):
             number=self.transfer_context.get(key)
             if type(number) is int and number>=0:value[key]=number
         value.update(details)
@@ -74,8 +75,33 @@ class TransferRecovery:
                 self.log('전송 진단 저장: '+str(path))
             except OSError:pass  # A full local disk must not hide the original failure.
 
+    def repair_hash_mismatch(self,item,target):
+        """Reset only an unverified staging file; never accept a changed source."""
+        count=self.hash_failures.get(item['path'],0)+1
+        self.transfer_context['hash_mismatches']=count
+        self.save_transfer_failure('SSH_FILE_HASH_MISMATCH',{
+            'operation':'local_hash','exception_type':'SHA256Mismatch','errno':None,'winerror':None},self.connection_retries)
+        number=self.transfer_context['file_number'];total=self.transfer_context['files_total']
+        if count>2:
+            self.hash_failures[item['path']]=count
+            raise CollectionError('같은 파일을 다시 받았지만 SHA-256이 계속 일치하지 않습니다. 완료로 처리하지 않았습니다. '
+                '[SSH_FILE_HASH_MISMATCH]\n진단: 파일 %s/%s · 검증 불일치 %s회\n'
+                '받은 파일과 캐시는 보존했습니다. 로그의 전송 진단 저장 경로에서 transfer-failure.json을 확인하세요.' %
+                (number,total,count))
+        # This check precedes any deletion of the cached copy. Source changes
+        # require a new snapshot, rather than repeatedly downloading new bytes.
+        self.io('remote_verify',self.execute,'verify')
+        self.checkpoint()
+        self.sequential_reads=True
+        self.log('파일 %s/%s SHA-256 불일치 · 해당 파일만 처음부터 순차 재수신 %s/2' % (number,total,count))
+        self.report('transfer',detail='SHA-256 불일치 파일 재수신 %s/2 · 다른 파일 보존' % count,force=True)
+        self.io('local_remove',target.unlink)
+        # A failed verification/reconnect did not start a clean download, so
+        # it must not consume a file-repair attempt.
+        self.hash_failures[item['path']]=count
+
     def transfer(self,folder):
-        self.transfer_context={};self.sequential_reads=False
+        self.transfer_context={};self.sequential_reads=False;self.hash_failures={};self.connection_retries=0
         retries=0
         while True:
             try:
@@ -104,6 +130,7 @@ class TransferRecovery:
                     fault.error.__traceback__=None
                     fault.__traceback__=None
                     retries+=1;self.sequential_reads=True
+                    self.connection_retries=retries
                     self.log(f'전송 읽기·연결 오류 · 자동 재연결 {retries}/3 · 받은 위치부터 재개 · 순차 읽기')
                     continue
                 labels={'remote_read':'서버 데이터 읽기','remote_stat':'서버 파일 확인','remote_open':'서버 파일 열기',
