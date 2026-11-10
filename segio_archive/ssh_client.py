@@ -487,7 +487,14 @@ class SSHCollector(TransferRecovery):
             detail={'initializing':'서버 작업 준비 중','database':'결재 DB 읽기 전용 추출 중',
                     'metadata':'파일 목록·검증 정보 순차 저장 중',
                     'mail':'서버 메일 원본 검사 중'}.get(stage,'서버 추출 준비 확인 중')
-            if stage=='metadata' or stage=='database' and status.get('phase')=='metadata':
+            if stage=='database' and status.get('phase') in ('io_throttle','io_sync'):
+                label='생성 파일을 디스크에 반영하는 중' if status['phase']=='io_sync' else '서버 쓰기 부하 조절 중'
+                size=status.get('io_written_bytes')
+                if type(size) is int and size>=0:label+=f' · 생성 {size/1024**2:.1f} MiB'
+                rate=status.get('io_limit_bytes')
+                if status['phase']=='io_throttle' and type(rate) is int and rate>0:label+=f' · 최대 {rate/1024**2:.1f} MiB/s'
+                self.report('server',status.get('records_done'),status.get('records_total'),'records',label)
+            elif stage=='metadata' or stage=='database' and status.get('phase')=='metadata':
                 self.report('server',detail='파일 목록·검증 정보 순차 저장 중')
             elif stage=='database' and status.get('records_total') is not None:
                 label={'snapshot':'DB 기록을 디스크에 정리 중','render':'결재 본문·첨부 생성 중'}.get(status.get('phase'),detail)

@@ -22,7 +22,7 @@ from live_export_worker import (read_json, write_json, check_user, mail_path, in
                                 fingerprint, file_identity, failure_details as worker_failure_details)
 
 PROTOCOL = 'segio-ssh-archive/1'
-REVISION = 'ssh-mail-capture-7'
+REVISION = 'ssh-io-backpressure-8'
 
 
 def memory_info():
@@ -38,11 +38,19 @@ def memory_info():
 
 class WorkBudget(object):
     """Limits affect this helper/its psql client only; never the SEGIO daemon."""
+    WRITE_RATE=8*1024**2
+    PRESSURE_RATE=1024**2
+    SYNC_BYTES=4*1024**2
+
     def __init__(self, root):
         self.root=root;self.last_document=0;self.last_memory=0;self.started=time.time();self.phase='query'
         self.lock=None
+        self.io_enabled=True;self.io_throttled=False;self.io_syncing=False;self.io_written=0
+        self.io_dirty=0;self.io_rate=self.WRITE_RATE;self.io_tick=lambda force=False:None
+        self._io_next=self.started;self._io_clock=self.started;self._io_sample=-1;self._io_pending=0
 
     def enter(self, apply_limits=True):
+        self.io_enabled=apply_limits
         if os.name!='posix':return
         import fcntl,resource
         path=os.path.dirname(self.root)
@@ -81,14 +89,44 @@ class WorkBudget(object):
 
     def document(self):
         self.phase='render';self.check()
-        waiting=time.time()
-        while memory_info().get('Dirty',0)>64*1024**2:
-            self.check()
-            if time.time()-waiting>30:raise SafeError('server_io_pressure')
-            time.sleep(.25)
+        self.io_sample()
         remaining=.05-(time.time()-self.last_document)
         if remaining>0:time.sleep(remaining)
         self.last_document=time.time()
+
+    def io_sample(self):
+        now=time.time()
+        if now<self._io_clock:self._io_next=now;self._io_sample=-1
+        self._io_clock=now
+        if now-self._io_sample>=.25 or self._io_sample<0:
+            self.io_dirty=memory_info().get('Dirty',0)
+            self.io_throttled=self.io_enabled and self.io_dirty>64*1024**2
+            self.io_rate=self.PRESSURE_RATE if self.io_throttled else self.WRITE_RATE
+            self._io_sample=now
+
+    def write(self,stream,block):
+        self.check();self.io_sample()
+        if self.io_enabled:
+            self._io_next=max(time.time(),self._io_next)+float(len(block))/self.io_rate
+            while self._io_next>time.time():
+                self.check();self.io_sample();self.io_tick()
+                time.sleep(min(.25,max(0,self._io_next-time.time())))
+        self.check()
+        written=stream.write(block)
+        if written is not None and written!=len(block):raise IOError(errno.EIO,'Incomplete generated-file write')
+        self.io_written+=len(block);self._io_pending+=len(block)
+        if self._io_pending>=self.SYNC_BYTES:self.finish(stream)
+
+    def finish(self,stream):
+        if not self._io_pending:return
+        self.check();self.io_syncing=True;self.io_tick(True)
+        try:
+            stream.flush()
+            getattr(os,'fdatasync',os.fsync)(stream.fileno())
+            self._io_pending=0
+        finally:
+            self.io_syncing=False
+        self.check();self.io_tick(True)
 
 
 def open_source(path):
@@ -352,10 +390,15 @@ def prepare(root, apply_limits=False):
         value = {'protocol': PROTOCOL, 'revision': REVISION, 'state': state, 'stage': stage}
         value.update(fields)
         write_json(status_path, value)
-    def pulse():
+    def pulse(force=False):
         budget.check()
-        if time.time()-last_report[0]>=1:
-            status('running',**current);last_report[0]=time.time()
+        if force or time.time()-last_report[0]>=1:
+            fields=dict(current)
+            if current.get('phase')=='render' and (budget.io_throttled or budget.io_syncing):
+                fields.update(phase='io_sync' if budget.io_syncing else 'io_throttle',
+                    io_written_bytes=budget.io_written,io_limit_bytes=budget.io_rate,dirty_bytes=budget.io_dirty)
+            status('running',**fields);last_report[0]=time.time()
+    budget.io_tick=pulse
     def detail(phase,done,total):
         budget.phase=phase
         if phase=='render':budget.document()
@@ -369,7 +412,7 @@ def prepare(root, apply_limits=False):
         for data in chunks:
             if not isinstance(data,bytes):data=data.encode('utf-8')
             for start in range(0,len(data),1024*1024):
-                pulse();block=data[start:start+1024*1024];spool[0].write(block);digest.update(block);size+=len(block)
+                pulse();block=data[start:start+1024*1024];budget.write(spool[0],block);digest.update(block);size+=len(block)
         details={'bytes':size,'sha256':digest.hexdigest()}
         references[relative]=dict(details,path=relative,source_hex=source_hex(spool_path),source_offset=offset)
         spooled[0]+=1
@@ -393,6 +436,7 @@ def prepare(root, apply_limits=False):
             if since is not None:options['approval_since']=since
             folder, archive = run_export(request['db_config'], user, root, **options)
             if spool[0] is not None:
+                budget.finish(spool[0])
                 spool[0].close();spool[0]=None
                 identity=fingerprint(spool_path)
                 spool_size=identity[2]
