@@ -44,7 +44,7 @@ v0.4.29는 서버 준비가 끝난 MBOX의 원래 바이트 범위만 복사합�
 
 ## Windows에서 실행
 
-1. **[Windows v0.4.28 직접 다운로드](https://github.com/soriel1004/segio/actions/runs/42721707287/artifacts/13720597862)**로 `SEGIOArchive-Windows`를 받습니다. GitHub 로그인 후 사용합니다. ZIP을 **한 번만 풀고** 바로 나타나는 `_internal`, `tools` 등 함께 있는 폴더를 유지한 채 `SEGIOArchive.exe`를 실행합니다. 제목의 `v0.4.28`을 확인합니다.
+1. **[Windows v0.4.29 직접 다운로드](https://github.com/soriel1004/segio/actions/runs/42758963193/artifacts/13736439828)**로 `SEGIOArchive-Windows`를 받습니다. GitHub 로그인 후 사용합니다. ZIP을 **한 번만 풀고** 바로 나타나는 `_internal`, `tools` 등 함께 있는 폴더를 유지한 채 `SEGIOArchive.exe`를 실행합니다. 제목의 `v0.4.29`를 확인합니다.
 2. 실행하면 SSH 입력 화면이 바로 표시됩니다. 별도로 가져오기 방식을 선택하지 않습니다.
 3. 아래 항목을 입력합니다.
 
