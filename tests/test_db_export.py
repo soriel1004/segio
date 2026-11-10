@@ -18,6 +18,32 @@ import export_approval_db as exporter
 
 
 class DBExportTests(unittest.TestCase):
+    def test_large_unicode_page_writes_with_8_mib_additional_headroom(self):
+        runtimes=[sys.executable]
+        if os.environ.get('SEGIO_TEST_PYTHON26'):runtimes.append(os.environ['SEGIO_TEST_PYTHON26'])
+        for executable in runtimes:
+            with self.subTest(runtime=executable),tempfile.TemporaryDirectory() as tmp:
+                result=subprocess.run([executable,str(Path(__file__).parent/'large_encoding_fixture.py'),tmp],
+                                      capture_output=True,text=True,timeout=60)
+                self.assertEqual(result.returncode,0,result.stderr)
+                report=json.loads(result.stdout)
+                self.assertTrue(report['ok'])
+                self.assertGreater(report['bytes'],8*1024**2)
+                self.assertLessEqual(report['max_chunk'],65536)
+
+    def test_byte_chunks_bounds_unicode_encoding_and_preserves_mixed_bytes(self):
+        class BoundedText(str):
+            def encode(self,*args,**kwargs):
+                if len(self)>16384:raise AssertionError('Whole Unicode value encoded')
+                return super().encode(*args,**kwargs)
+        value=BoundedText('한글\U0001f600'*50000)
+        binary=b'\xff\x00original\x80'
+        expected=str(value).encode('utf-8')+binary+b'end'
+        for limit in (3,65536):
+            chunks=list(exporter.byte_chunks(iter((value,binary,'end')),limit=limit))
+            self.assertEqual(b''.join(chunks),expected)
+            self.assertTrue(all(len(part)<=limit for part in chunks))
+
     def test_streamed_metadata_preserves_large_offsets_and_cancel_keeps_previous_json(self):
         import live_export_worker as worker
         with tempfile.TemporaryDirectory() as tmp:

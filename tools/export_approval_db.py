@@ -338,14 +338,17 @@ def json_chunks(value):
 def byte_chunks(chunks,limit=65536):
     parts=[];size=0
     for data in chunks:
-        if not isinstance(data,bytes):data=data.encode('utf-8')
-        if len(data)>=limit:
-            if parts:yield b''.join(parts);parts=[];size=0
-            for offset in range(0,len(data),limit):yield data[offset:offset+limit]
-        else:
-            if parts and size+len(data)>limit:yield b''.join(parts);parts=[];size=0
-            parts.append(data);size+=len(data)
-            if size>=limit:yield b''.join(parts);parts=[];size=0
+        # Split Unicode before encoding: a whole rendered page can be much
+        # larger than the free space within the helper's address-space limit.
+        pieces=(data,) if isinstance(data,bytes) else (piece.encode('utf-8') for piece in text_chunks(data))
+        for block in pieces:
+            if len(block)>=limit:
+                if parts:yield b''.join(parts);parts=[];size=0
+                for offset in range(0,len(block),limit):yield block[offset:offset+limit]
+            else:
+                if parts and size+len(block)>limit:yield b''.join(parts);parts=[];size=0
+                parts.append(block);size+=len(block)
+                if size>=limit:yield b''.join(parts);parts=[];size=0
     if parts:yield b''.join(parts)
 
 

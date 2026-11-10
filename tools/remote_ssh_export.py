@@ -22,7 +22,7 @@ from live_export_worker import (read_json, write_json, check_user, mail_path, in
                                 fingerprint, file_identity, failure_details as worker_failure_details)
 
 PROTOCOL = 'segio-ssh-archive/1'
-REVISION = 'ssh-io-backpressure-8'
+REVISION = 'ssh-bounded-encoding-9'
 
 
 def memory_info():
