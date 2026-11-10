@@ -31,6 +31,100 @@ from ssh_fixture import SSHServer
 
 
 class SSHArchiveTests(unittest.TestCase):
+    def test_source_check_does_not_authorize_cleanup_without_valid_copy_receipt(self):
+        from export_schema_from_segio_config import SafeError
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config,_=self.fixture(root)
+            collector=SSHCollector(config,confirm_host=lambda *_:True)
+            def stop(folder):raise Cancelled('Synthetic interruption before copying')
+            collector.transfer=stop
+            with patch.object(helper,'run_export',side_effect=synthetic_export),self.assertRaises(Cancelled):
+                collector.run('SYNTHETIC_SSH_PASSWORD')
+            job=server.path(collector.remote)
+            helper.verify_sources(str(job),'check')
+            self.assertFalse((job/'verified.json').exists())
+            with self.assertRaises((OSError,SafeError)):helper.verify_sources(str(job),'copy')
+            status=json.loads((job/'status.json').read_text())
+            receipt={'protocol':'segio-ssh-copy/1','job':job.name,'files':status['files'],'bytes':status['bytes'],'manifest_sha256':'0'*64}
+            (job/'copy-receipt.json').write_text(json.dumps(receipt))
+            with self.assertRaises(SafeError):helper.verify_sources(str(job),'copy')
+            self.assertFalse((job/'verified.json').exists())
+            with (root/'home/e/employee/mbox/inbox.mbox').open('ab') as stream:stream.write(b'\nAPPEND')
+            with self.assertRaises(SafeError):helper.verify_sources(str(job))
+
+    def test_mail_growth_before_during_or_after_transfer_keeps_only_hashed_capture(self):
+        for moment in ('before','during','after'):
+            with self.subTest(moment=moment),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp).resolve();server,config,_=self.fixture(root)
+                source=root/'home/e/employee/mbox/large.mbox'
+                payload=b'From a@example.test\nSubject: Captured\n\n'+b'x'*(2*1024*1024)
+                source.write_bytes(payload);extra=b'\nFrom a@example.test\nSubject: Later arrival\n\nLATER\n'
+                collector=SSHCollector(config,confirm_host=lambda *_:True);wait=collector.wait_ready;call=collector.io;execute=collector.execute;changed=[False]
+                def append():
+                    if not changed[0]:
+                        with source.open('ab') as out:out.write(extra)
+                        changed[0]=True
+                def ready():
+                    wait()
+                    if moment=='before':append()
+                def observed(operation,callback,*args,**kwargs):
+                    if moment=='during' and operation=='local_write' and collector.transfer_context.get('file_bytes')==len(payload):append()
+                    return call(operation,callback,*args,**kwargs)
+                def executing(action,detach=False):
+                    if moment=='after' and action=='verify-copy':append()
+                    return execute(action,detach)
+                collector.wait_ready=ready;collector.io=observed;collector.execute=executing
+                with patch.object(helper,'run_export',side_effect=synthetic_export):result=collector.run('SYNTHETIC_SSH_PASSWORD')
+                self.assertTrue(changed[0]);self.assertEqual(source.read_bytes(),payload+extra)
+                self.assertIn(payload,[p.read_bytes() for p in (result/'mail/raw').iterdir()])
+                manifest=json.loads((result/'manifest.json').read_text())
+                growth=[x for x in manifest['coverage'] if x['kind']=='mail_growth_after_capture']
+                self.assertEqual(growth[0]['bytes'],len(extra))
+                self.assertEqual(manifest['source_captured_by_kind']['mail'],manifest['finished_at'])
+                self.assertTrue(any('추가 백업' in x for x in manifest['warnings']))
+                self.assertFalse(manifest['account_deletion_verified'])
+                self.assertTrue(verify_archive(result)['ok']);self.assertEqual(server.actions.count('prepare'),1)
+                reads=[(off,length) for path,off,length in server.reads if path.endswith('large.mbox')]
+                self.assertTrue(reads);self.assertLessEqual(max(off+length for off,length in reads),len(payload))
+
+    def test_growth_with_corrupt_captured_prefix_never_sends_copy_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config,_=self.fixture(root)
+            source=root/'home/e/employee/mbox/inbox.mbox'
+            collector=SSHCollector(config,confirm_host=lambda *_:True);wait=collector.wait_ready
+            def ready():
+                wait();data=source.read_bytes();source.write_bytes(bytes([data[0]^1])+data[1:]+b'APPENDED')
+            collector.wait_ready=ready
+            with patch.object(helper,'run_export',side_effect=synthetic_export),self.assertRaisesRegex(CollectionError,'SSH_FILE_HASH_MISMATCH'):
+                collector.run('SYNTHETIC_SSH_PASSWORD')
+            job=server.path(collector.remote)
+            self.assertFalse((job/'verified.json').exists());self.assertFalse((job/'copy-receipt.json').exists())
+            self.assertNotIn('verify-copy',server.actions);self.assertNotIn('cleanup',server.actions)
+
+    def test_changed_identity_truncation_same_size_edit_and_non_mbox_growth_stay_blocked(self):
+        for change in ('replace','truncate','edit','new_file','eml_growth','binary_growth'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp).resolve();server,config,_=self.fixture(root)
+                source=root/'home/e/employee/mbox/inbox.mbox'
+                if change=='eml_growth':source.write_bytes(b'Subject: Single EML\n\nBODY')
+                if change=='binary_growth':source.write_bytes(b'\x00BINARY_INDEX')
+                collector=SSHCollector(config,confirm_host=lambda *_:True);wait=collector.wait_ready
+                def ready():
+                    wait();data=source.read_bytes()
+                    if change=='replace':
+                        other=source.with_suffix('.replacement');other.write_bytes(data+b'new');other.replace(source)
+                    elif change=='truncate':source.write_bytes(data[:-1])
+                    elif change=='edit':
+                        source.write_bytes(bytes([data[0]^1])+data[1:]);stamp=source.stat().st_mtime+5;os.utime(source,(stamp,stamp))
+                    elif change=='new_file':source.with_name('new.mbox').write_bytes(data)
+                    else:
+                        with source.open('ab') as out:out.write(b'new')
+                collector.wait_ready=ready
+                with patch.object(helper,'run_export',side_effect=synthetic_export),self.assertRaises(CollectionError):
+                    collector.run('SYNTHETIC_SSH_PASSWORD')
+                self.assertFalse((server.path(collector.remote)/'verified.json').exists())
+                self.assertNotIn('cleanup',server.actions)
+
     def test_failure_before_first_mail_saves_local_diagnostic_and_preserves_raw_backup(self):
         import segio_archive.portable_mail as portable
         with tempfile.TemporaryDirectory() as tmp:
@@ -189,7 +283,7 @@ class SSHArchiveTests(unittest.TestCase):
                 result=collector.run('SYNTHETIC_SSH_PASSWORD')
             self.assertTrue(failed[0]);self.assertTrue(collector.sequential_reads)
             self.assertEqual(server.actions.count('prepare'),1)
-            self.assertGreaterEqual(server.actions.count('verify'),2)
+            self.assertGreaterEqual(server.actions.count('check-copy'),2)
             self.assertIn(payload,[p.read_bytes() for p in (result/'mail/raw').iterdir()])
             self.assertTrue(verify_archive(result)['ok'])
 
@@ -241,6 +335,7 @@ class SSHArchiveTests(unittest.TestCase):
             collector.transfer_failure_path=root/'transfer-failure.json'
             collector.reconnect_transfer=Mock();collector.read_json=Mock(return_value={'protocol':helper.PROTOCOL,'state':'ready'})
             collector.execute=Mock()
+            collector.check_copy_sources=Mock()
             collector.transfer_once=Mock(side_effect=TransferFault('remote_read',TimeoutError(errno.ETIMEDOUT,'PRIVATE_ERROR')))
             with patch.object(config.cancel,'wait',return_value=False),self.assertRaisesRegex(CollectionError,'SSH_TRANSFER_INTERRUPTED'):
                 collector.transfer(root)
@@ -375,7 +470,7 @@ class SSHArchiveTests(unittest.TestCase):
             self.assertTrue(config.known_hosts.is_file())
             self.assertEqual(len(fingerprints),1)
             self.assertTrue(fingerprints[0][2].startswith('SHA256:'))
-            self.assertEqual(server.actions,['prepare','verify','cleanup'])
+            self.assertEqual(server.actions,['prepare','check-copy','verify-copy','cleanup'])
             self.assertEqual(list((root/'jobs').glob('.segio-ssh-*')),[])
             self.assertFalse((result/'mail/messages').exists())
             for path in result.rglob('*'):
@@ -462,6 +557,7 @@ class SSHArchiveTests(unittest.TestCase):
                     collector.run('SYNTHETIC_SSH_PASSWORD')
                 self.assertEqual(server.actions.count('prepare'),1)
                 self.assertTrue(list(config.output.glob('.segio-ssh-cache/*/session.json')))
+                with source.open('ab') as stream:stream.write(b'\nFrom later@example.test\nSubject: Later arrival\n\nLater\n')
                 config.cancel=threading.Event()
                 reads=len(server.reads)
                 result=SSHCollector(config).run('SYNTHETIC_SSH_PASSWORD')
@@ -581,12 +677,17 @@ class SSHArchiveTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve();server,config,_=self.fixture(root)
             first=SSHCollector(config,confirm_host=lambda *_:True)
-            with patch.object(helper,'run_export',side_effect=synthetic_export),patch.object(helper,'verify_sources',side_effect=SafeError('invalid_metadata')):
+            verify=helper.verify_sources
+            def old_verifier(path,mode='strict'):
+                if mode=='copy':raise SafeError('invalid_metadata')
+                return verify(path,mode)
+            with patch.object(helper,'run_export',side_effect=synthetic_export),patch.object(helper,'verify_sources',side_effect=old_verifier):
                 with self.assertRaisesRegex(CollectionError,'invalid_metadata'):
                     first.run('SYNTHETIC_SSH_PASSWORD')
             job=server.path(first.remote)
             self.assertEqual(json.loads((job/'status.json').read_text())['state'],'ready')
             (job/'remote_ssh_export.py').write_bytes(b'OLD_VERIFIER_TO_BE_REPLACED')
+            (job/'mail-formats.json').unlink()  # Older ready jobs have only sources.json/mail-check.json.
             reads=len(server.reads)
             result=SSHCollector(config).run('SYNTHETIC_SSH_PASSWORD')
             self.assertEqual(server.actions.count('prepare'),1)
@@ -642,9 +743,9 @@ class SSHArchiveTests(unittest.TestCase):
             collector=SSHCollector(config,confirm_host=lambda *_:True)
             execute=collector.execute
             def mutate(action,detach=False):
-                if action=='verify':
-                    with (root/'home/e/employee/mbox/inbox.mbox').open('ab') as stream:
-                        stream.write(b'new incoming mail')
+                if action=='verify-copy':
+                    source=root/'home/e/employee/mbox/inbox.mbox'
+                    source.write_bytes(source.read_bytes()[:-1])
                 return execute(action,detach)
             collector.execute=mutate
             with patch.object(helper,'run_export',side_effect=synthetic_export):

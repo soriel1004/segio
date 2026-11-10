@@ -1,5 +1,5 @@
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime,timedelta,timezone
 from email.utils import formatdate
 import hashlib
 import json
@@ -24,6 +24,49 @@ import remote_ssh_export as helper
 
 
 class BackupUpdateTests(unittest.TestCase):
+    def test_mailbox_without_selected_delta_ranges_can_grow_and_next_backup_catches_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config=self.fixture(root)
+            raw=root/'home/e/employee/mbox/inbox.mbox'
+            raw.write_bytes(self.message('Old','Mon, 01 Jan 2024 00:00:00 +0000'))
+            with patch.object(helper,'run_export',side_effect=synthetic_export):
+                first=SSHCollector(config,confirm_host=lambda *_:True).run('SYNTHETIC_SSH_PASSWORD')
+                collector=SSHCollector(config);wait=collector.wait_ready
+                extra=b'\n'+self.message('After delta ready',formatdate(usegmt=True))
+                def ready():
+                    wait()
+                    with raw.open('ab') as stream:stream.write(extra)
+                collector.wait_ready=ready
+                second=collector.run('SYNTHETIC_SSH_PASSWORD')
+                self.assertEqual(search(second,'After delta ready',kind='mail')['total'],0)
+                growth=[entry for entry in load(second/'manifest.json')['coverage'] if entry['kind']=='mail_growth_after_capture']
+                self.assertEqual(growth[0]['bytes'],len(extra))
+                result=SSHCollector(config).run('SYNTHETIC_SSH_PASSWORD')
+            self.assertEqual(result,first)
+            self.assertEqual(search(result,'After delta ready',kind='mail')['total'],1)
+            self.assertEqual(search(result,kind='mail')['total'],2)
+            self.assertFalse(any(entry['kind']=='mail_growth_after_capture' for entry in load(result/'manifest.json')['coverage']))
+            self.assertTrue(verify_archive(result)['ok'])
+
+    def test_delayed_capture_uses_prepared_date_so_incremental_does_not_miss_later_mail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config=self.fixture(root)
+            raw=root/'home/e/employee/mbox/inbox.mbox'
+            raw.write_bytes(self.message('Old','Mon, 01 Jan 2024 00:00:00 +0000'))
+            with patch.object(helper,'run_export',side_effect=synthetic_export):
+                first=SSHCollector(config,confirm_host=lambda *_:True).run('SYNTHETIC_SSH_PASSWORD')
+                data=load(first/'manifest.json');captured=int(time.time())-40*86400
+                stamp=datetime.fromtimestamp(captured,timezone.utc).isoformat()
+                data['finished_at']=stamp;data['source_captured_by_kind']['mail']=stamp
+                save(first/'manifest.json',data)
+                day=datetime.fromtimestamp(captured,KST).replace(hour=0,minute=0,second=0,microsecond=0)
+                self.assertEqual(cutoff(first,['mail']),int((day-timedelta(days=15)).timestamp()))
+                with raw.open('ab') as stream:stream.write(b'\n'+self.message('Arrived after capture',formatdate(time.time()-20*86400,usegmt=True)))
+                result=SSHCollector(config).run('SYNTHETIC_SSH_PASSWORD')
+            self.assertEqual(search(result,'Arrived after capture',kind='mail')['total'],1)
+            self.assertEqual(search(result,kind='mail')['total'],2)
+            self.assertTrue(verify_archive(result)['ok'])
+
     def fixture(self,root):
         create_fixture(root);server=SSHServer(root);self.addCleanup(server.close)
         config=SSHConfig('127.0.0.1','root','employee',root/'windows',port=server.port,

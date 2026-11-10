@@ -356,7 +356,7 @@ class App(tk.Tk):
             self.user.set(manifest['user'])
             self.folder.set(str(selection_output(path)))
             if complete(path) and selection_output(path)==path.parent:
-                self.status.set('추가 백업 준비 완료: 서버 SSH 암호를 입력하고 수집 시작을 누르세요. 마지막 완료일의 15일 전부터 병합합니다.')
+                self.status.set('추가 백업 준비 완료: 서버 SSH 암호를 입력하고 수집 시작을 누르세요. 이전 원본 기준 시점의 15일 전부터 병합합니다.')
                 if self.ssh_password.get() or self.ssh_key.get():self.start()
                 return
             self.local_conversion=True;self.connection_check=False;self.running=True

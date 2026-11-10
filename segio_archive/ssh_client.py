@@ -533,8 +533,13 @@ class SSHCollector(TransferRecovery):
                 continue
             attributes = self.io('remote_stat',self.sftp.lstat,source)
             offset=item.get('source_offset',0)
-            if not stat.S_ISREG(attributes.st_mode) or attributes.st_size != item.get('source_bytes',item['bytes']):
-                raise CollectionError('서버 원본이 변경됐습니다. 이어받기를 해제해 새로 추출하세요. [SSH_SOURCE_CHANGED]')
+            captured=item.get('source_bytes',item['bytes'])
+            growing=self.appendable.get(item['path'])==captured and attributes.st_size>=captured
+            if not stat.S_ISREG(attributes.st_mode) or (attributes.st_size!=captured and not growing):
+                self.save_transfer_failure('SSH_SOURCE_CHANGED',{'operation':'remote_stat','exception_type':'SourceChanged',
+                    'expected_source_bytes':captured,'actual_source_bytes':attributes.st_size,'errno':None,'winerror':None},self.connection_retries)
+                raise CollectionError('서버 원본이 변경됐습니다. 이어받기를 해제해 새로 추출하세요. [SSH_SOURCE_CHANGED]\n'
+                    '원본 크기: %s → %s 바이트 · 파일 %s/%s'%(captured,attributes.st_size,self.transfer_context['file_number'],self.transfer_context['files_total']))
             incoming=outgoing=None
             try:
                 incoming=self.io('remote_open',self.sftp.open,source,'rb')
@@ -582,6 +587,7 @@ class SSHCollector(TransferRecovery):
             return done,logged
 
     def transfer_once(self,folder):
+        self.check_copy_sources()
         metadata = self.io('remote_metadata',self.read_json,self.remote+'/transfer.json')
         if (metadata.get('protocol') != PROTOCOL or metadata.get('user') != self.config.username or
                 metadata.get('job') != self.remote.rsplit('/',1)[1] or not isinstance(metadata.get('files'),list)):
@@ -635,7 +641,29 @@ class SSHCollector(TransferRecovery):
         for name, details in manifest['files'].items():
             if any(details[key]!=by_name[name][key] for key in ('bytes','sha256')):
                 raise CollectionError('SSH 보관 파일 검증 목록이 일치하지 않습니다.')
+        self.copy_receipt={'protocol':'segio-ssh-copy/1','job':self.remote.rsplit('/',1)[1],
+            'files':len(records),'bytes':total,'manifest_sha256':by_name['manifest.json']['sha256']}
+        self.copy_scope={'protocol':'segio-copy-scope/1','job':snapshot['job']}
+        for kind in ('approvals','mail'):
+            if getattr(self.config,kind):self.copy_scope[kind]=manifest['finished_at']
+        atomic_write(self.copy_scope_path,json.dumps(self.copy_scope).encode('utf-8'))
         self.report('transfer',done,total,'bytes','SFTP 전송 및 파일 검증 완료',force=True)
+
+    def check_copy_sources(self):
+        self.io('remote_verify',self.execute,'check-copy')
+        result=self.io('remote_verify',self.read_json,self.remote+'/copy-plan.json')
+        values=result.get('appendable')
+        if result.get('protocol')!='segio-ssh-copy-plan/1' or result.get('job')!=self.remote.rsplit('/',1)[1] or not isinstance(values,dict) or any(not isinstance(key,str) or not key.startswith('mail/raw/') or
+                type(size) is not int or size<0 for key,size in values.items()):
+            raise CollectionError('메일 스냅샷 범위 응답을 확인하지 못했습니다. [SSH_HELPER_RESPONSE]')
+        self.appendable=values
+
+    def verify_copy(self):
+        temporary=self.remote+'/copy-receipt.json.tmp'
+        with self.sftp.open(temporary,'wb') as stream:stream.write(json.dumps(self.copy_receipt).encode('utf-8'))
+        self.sftp.chmod(temporary,0o600)
+        self.sftp.posix_rename(temporary,self.remote+'/copy-receipt.json')
+        return self.execute('verify-copy')
 
     def run(self,password):
         self.config.validate()
@@ -652,6 +680,7 @@ class SSHCollector(TransferRecovery):
             from .backup_update import workspace,load,save,merge,publish,named_folder
             output,cache,contents,base,plan=workspace(output,self.config.username,identity,self.config.resume)
             self.processing_root=contents
+            self.copy_scope_path=cache/'copy-scope.json'
             self.transfer_failure_path=cache/'transfer-failure.json'
             self.since=plan.get('since')
             origin={key:value for key,value in identity.items() if key not in ('approvals','mail')}
@@ -663,7 +692,7 @@ class SSHCollector(TransferRecovery):
                 if not self.valid_remote(self.remote):raise CollectionError('완료 작업의 정리 경로를 확인하세요.')
                 result=contents
             else:
-                if self.since is not None:self.log('추가 백업: 마지막 완료일의 15일 전부터 결재·메일을 가져와 기존 자료와 병합합니다.')
+                if self.since is not None:self.log('추가 백업: 이전 백업의 원본 기준 시점에서 15일 전부터 가져와 기존 자료와 병합합니다.')
                 self.begin_stage('prepare')
                 self.initialize(cache)
                 self.begin_stage('server')
@@ -671,11 +700,23 @@ class SSHCollector(TransferRecovery):
                 self.begin_stage('transfer','전송 목록 확인 중')
                 self.transfer(contents)
                 self.begin_stage('verify')
-                self.execute('verify')
+                coverage=self.verify_copy()
                 self.reconnect_transfer=None;password=''
                 local_manifest=load(contents/'manifest.json')
                 local_manifest['collector_version']=__version__
                 local_manifest['backup_origin']=origin
+                for kind in ('approvals','mail'):
+                    if kind in self.copy_scope:local_manifest.setdefault('source_captured_by_kind',{})[kind]=self.copy_scope[kind]
+                if self.config.mail:
+                    local_manifest['ssh_export']['mail_capture']='captured-sha256/1'
+                    local_manifest.setdefault('coverage',[]).append({'kind':'mail_snapshot_scope','captured_at':self.copy_scope['mail'],'policy':'captured-sha256/1'})
+                    self.log('메일 원본 범위: 서버 준비 시점 '+self.copy_scope['mail']+' · 이후 도착 메일은 추가 백업 대상입니다.')
+                    if coverage.get('growth_files',0):
+                        local_manifest['state']='collected_with_warnings'
+                        local_manifest.setdefault('coverage',[]).append({'kind':'mail_growth_after_capture',
+                            'files':coverage['growth_files'],'bytes':coverage['growth_bytes'],'captured_at':self.copy_scope['mail']})
+                        warning='백업 준비 후 메일 원본이 증가했습니다. 이번 백업은 준비 당시 범위까지 보관하며 이후 메일은 추가 백업이 필요합니다.'
+                        local_manifest.setdefault('warnings',[]).insert(0,warning);self.log(warning)
                 save(contents/'manifest.json',local_manifest)
                 self.phase='Windows 검색 색인 생성'
                 self.log('메일 검색 DB와 바로보기 HTML·첨부를 만드는 중 · 완료한 페이지는 재사용합니다')

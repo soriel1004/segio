@@ -3,6 +3,7 @@
 Python 3 developer tool; optional pgserver==0.1.4 and Playwright for browser check.
 """
 import base64
+import hashlib
 from contextlib import closing
 import json
 from html import escape
@@ -219,6 +220,29 @@ def main():
                 assert result.returncode==0,'Python 2.6 SSH source verification failed'
                 assert (legacy_root/'verified.json').is_file()
                 print('PASS: actual Python 2.6 SSH DB/MBOX preparation and verification')
+                (legacy_root/'verified.json').unlink()
+                with (mailbox/'inbox.mbox').open('ab') as stream:stream.write(b'\nFrom later@example.test\nSubject: Later mail\n\nLater\n')
+                result=subprocess.run(command[:-1]+['check-copy'],capture_output=True,timeout=60)
+                assert result.returncode==0,'Python 2.6 captured-mail preflight failed'
+                assert not (legacy_root/'verified.json').exists()
+                capture=worker.read_json(str(legacy_root/'transfer.json'),None)
+                for item in capture['files']:
+                    digest=hashlib.sha256();remaining=item['bytes']
+                    with open(bytes.fromhex(item['source_hex']),'rb') as stream:
+                        stream.seek(item.get('source_offset',0))
+                        while remaining:
+                            block=stream.read(min(1024*1024,remaining));assert block
+                            digest.update(block);remaining-=len(block)
+                    assert digest.hexdigest()==item['sha256']
+                receipt={'protocol':'segio-ssh-copy/1','job':legacy_root.name,
+                    'files':len(capture['files']),'bytes':sum(item['bytes'] for item in capture['files']),
+                    'manifest_sha256':next(item['sha256'] for item in capture['files'] if item['path']=='manifest.json')}
+                worker.write_json(str(legacy_root/'copy-receipt.json'),receipt)
+                result=subprocess.run(command[:-1]+['verify-copy'],capture_output=True,timeout=60)
+                assert result.returncode==0,'Python 2.6 captured-mail receipt verification failed'
+                assert json.loads(result.stdout)['growth_files']==1
+                assert worker.read_json(str(legacy_root/'verified.json'))['verification']=='captured-sha256/1'
+                print('PASS: actual Python 2.6 captured MBOX prefix, growth and copy receipt')
             worker.write_json(str(job/'request.json'), {'username':'target','approvals':True,'mail':False,'created_at':1})
             worker.run_job(str(live_root/'config.json'), job_id)
             status = worker.read_json(str(job/'status.json'))

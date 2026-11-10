@@ -234,6 +234,10 @@ class Access(paramiko.ServerInterface):
                     helper.verify_sources(str(root))
                     channel.send(json.dumps({'protocol':helper.PROTOCOL,'ok':True}).encode())
                     channel.send_exit_status(0)
+                elif action in ('check-copy','verify-copy'):
+                    result=helper.verify_sources(str(root),'check' if action=='check-copy' else 'copy')
+                    channel.send(json.dumps(dict(result,protocol=helper.PROTOCOL,ok=True)).encode())
+                    channel.send_exit_status(0)
                 elif action=='cleanup':
                     import shutil
                     helper.private_root(str(root))

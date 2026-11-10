@@ -90,7 +90,7 @@ class TransferRecovery:
                 (number,total,count))
         # This check precedes any deletion of the cached copy. Source changes
         # require a new snapshot, rather than repeatedly downloading new bytes.
-        self.io('remote_verify',self.execute,'verify')
+        self.check_copy_sources()
         self.checkpoint()
         self.sequential_reads=True
         self.log('파일 %s/%s SHA-256 불일치 · 해당 파일만 처음부터 순차 재수신 %s/2' % (number,total,count))
@@ -113,7 +113,7 @@ class TransferRecovery:
                     status=self.io('remote_ready',self.read_json,self.remote+'/status.json',65536)
                     if status.get('protocol')!='segio-ssh-archive/1' or status.get('state')!='ready':
                         raise CollectionError('같은 서버 추출 작업이 준비 상태가 아닙니다. 받은 파일과 캐시를 보존하세요. [SSH_SNAPSHOT_NOT_READY]')
-                    self.io('remote_verify',self.execute,'verify')
+                    self.check_copy_sources()
                 self.transfer_once(folder)
                 path=getattr(self,'transfer_failure_path',None)
                 if path:

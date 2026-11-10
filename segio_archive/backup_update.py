@@ -41,6 +41,8 @@ def cutoff(path,kinds=None):
                 previous=data.get('last_backup_completed_at') or data.get('finished_at')
             value=text_timestamp(previous)
             if value is None:return None
+            captured=text_timestamp(data.get('source_captured_by_kind',{}).get(kind))
+            if captured is not None:value=min(value,captured)
             values.append(value)
         stamp=min(values)
     if stamp is None:raise CollectionError('이전 백업 완료 날짜를 확인할 수 없습니다. [BACKUP_DATE_MISSING]')
@@ -280,9 +282,16 @@ def merge(base,incoming,stage,checkpoint=lambda:None,log=lambda _:None,progress=
     files['catalog.sqlite3']=digest_file(stage/'catalog.sqlite3')
     result['counts']['mail_files']=len(old_sources['sources'])
     result.update(ssh_export=new['ssh_export'],collector_version=new['collector_version'],finished_at=new.get('finished_at',old.get('finished_at')))
+    result.setdefault('source_captured_by_kind',{}).update(new.get('source_captured_by_kind',{}))
     if new.get('document_layout'):result['document_layout']='catalog-paths/1'
     result['retained_ssh_jobs']=list(dict.fromkeys(old.get('retained_ssh_jobs',[])+[old['ssh_export']['job']]))
-    result['warnings']=list(dict.fromkeys(old.get('warnings',[])+new.get('warnings',[])))
+    prior_warnings=old.get('warnings',[])
+    if new['ssh_export'].get('mail_capture')=='captured-sha256/1':
+        prior_warnings=[value for value in prior_warnings if not value.startswith('백업 준비 후 메일 원본이 증가했습니다.')]
+        scope_kinds={'mail_snapshot_scope','mail_growth_after_capture'}
+        result['coverage']=[value for value in result.get('coverage',[]) if value.get('kind') not in scope_kinds]
+        result['coverage'].extend(value for value in new.get('coverage',[]) if value.get('kind') in scope_kinds)
+    result['warnings']=list(dict.fromkeys(prior_warnings+new.get('warnings',[])))
     result.pop('portable_mail',None);result.pop('browser_index',None)
     result['incremental']={'since':new['ssh_export'].get('since'),'overlap_days':15,'added_mail':added,
                            'updated_approval':len(fresh['items']),'previous_completed_at':old.get('last_backup_completed_at',old.get('finished_at'))}
@@ -368,6 +377,14 @@ def repair_local(path,checkpoint=lambda:None,log=lambda _:None,progress=None,ori
     cache=root.parent if root.name in ('contents','incoming','merged') and root.parent.parent.name=='.segio-ssh-cache' else root.parent/'.segio-ssh-cache'/safe_name(manifest['user'],100)
     if cache.parent.exists():hide_control(cache.parent)
     plan=load(cache/'plan.json') if (cache/'plan.json').exists() else {}
+    scope=load(cache/'copy-scope.json') if (cache/'copy-scope.json').exists() else {}
+    if scope.get('protocol')=='segio-copy-scope/1' and scope.get('job')==manifest.get('ssh_export',{}).get('job'):
+        captured={kind:scope[kind] for kind in ('approvals','mail') if text_timestamp(scope.get(kind)) is not None and manifest.get('ssh_export',{}).get(kind)}
+        manifest.setdefault('source_captured_by_kind',{}).update(captured);save(root/'manifest.json',manifest)
+        if plan.get('base'):
+            incoming_manifest=load(cache/'incoming'/'manifest.json')
+            if incoming_manifest.get('ssh_export',{}).get('job')==scope['job']:
+                incoming_manifest.setdefault('source_captured_by_kind',{}).update(captured);save(cache/'incoming'/'manifest.json',incoming_manifest)
     output=cache.parent.parent if cache.parent.name=='.segio-ssh-cache' else root.parent
     target=named_folder(output,manifest['user'])
     if plan.get('base'):

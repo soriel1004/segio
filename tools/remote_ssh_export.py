@@ -22,7 +22,7 @@ from live_export_worker import (read_json, write_json, check_user, mail_path, in
                                 fingerprint, file_identity, failure_details as worker_failure_details)
 
 PROTOCOL = 'segio-ssh-archive/1'
-REVISION = 'ssh-disk-metadata-6'
+REVISION = 'ssh-mail-capture-7'
 
 
 def memory_info():
@@ -196,7 +196,7 @@ def mail_delta_attempt(request,status,since):
                 sources.append(source)
                 transfers.append(dict(source,path=relative,source_hex=source_hex(path),source_offset=start,source_bytes=identity[2]))
         if fingerprint(path)!=identity:raise SafeError('mail_changed_retry')
-        identities.append({'name_hex':source_hex(name),'identity':list(identity)})
+        identities.append({'name_hex':source_hex(name),'identity':list(identity),'format':kind})
         completed+=identity[2]
     if inventory(mail_path(request['mail_template'],request['user']))!=before:raise SafeError('mail_changed_retry')
     status('running',files_done=len(before),files_total=len(before),attempt=1,completed_bytes=total,total_bytes=total)
@@ -303,7 +303,7 @@ def mail_snapshot(request, status):
                 source=dict(details,path=relative,name=display,name_bytes_hex=source_hex(name),format=kind)
                 sources.append(source)
                 transfers.append(dict(details,path=relative,source_hex=source_hex(path)))
-                identities.append({'name_hex':source['name_bytes_hex'],'identity':list(identity)})
+                identities.append({'name_hex':source['name_bytes_hex'],'identity':list(identity),'format':kind})
                 completed+=details['bytes']
                 report(0,True)
             if inventory(mailbox_root)==before:
@@ -428,6 +428,9 @@ def prepare(root, apply_limits=False):
             transfers.extend(mail_transfers)
             for source in sources:
                 manifest['files'][source['path']]=dict((key,source[key]) for key in ('bytes','sha256'))
+            formats={}
+            for entry in identities:formats[entry['name_hex']]=entry.pop('format')
+            write_json(os.path.join(root,'mail-formats.json'),formats,checkpoint=pulse)
             write_json(os.path.join(root, 'mail-check.json'), identities,checkpoint=pulse)
             mail_dir = os.path.join(folder, 'mail')
             os.mkdir(mail_dir, 0o700)
@@ -470,10 +473,30 @@ def prepare(root, apply_limits=False):
         finally:budget.close()
 
 
-def verify_sources(root):
+def capture_directory(root):
+    matches=[]
+    for name in os.listdir(root):
+        path=os.path.join(root,name)
+        if os.path.isdir(path) and not os.path.islink(path) and os.path.isfile(os.path.join(path,'manifest.json')):
+            if os.path.islink(os.path.join(path,'manifest.json')):raise SafeError('unsafe_job')
+            matches.append(path)
+    if len(matches)!=1:raise SafeError('invalid_metadata')
+    return matches[0]
+
+
+def verify_sources(root, mode='strict'):
     root, request = private_root(root)
-    if read_json(os.path.join(root, 'status.json')).get('state') != 'ready':
+    ready=read_json(os.path.join(root, 'status.json'))
+    if ready.get('state') != 'ready':
         raise SafeError('export_not_ready')
+    if mode not in ('strict','check','copy'):raise SafeError('invalid_metadata')
+    if mode=='copy':
+        receipt=read_json(os.path.join(root,'copy-receipt.json'))
+        if (receipt.get('protocol')!='segio-ssh-copy/1' or receipt.get('job')!=os.path.basename(root) or
+                receipt.get('files')!=ready.get('files') or receipt.get('bytes')!=ready.get('bytes') or
+                receipt.get('manifest_sha256')!=hash_file(os.path.join(capture_directory(root),'manifest.json'))['sha256']):
+            raise SafeError('invalid_metadata')
+    result={'appendable':{},'growth_files':0,'growth_bytes':0}
     # These lists are generated inside this owned private job. They routinely
     # exceed the 64 KiB bound used for untrusted requests/control messages.
     for entry in read_json(os.path.join(root, 'approval-check.json'), None) if os.path.isfile(os.path.join(root, 'approval-check.json')) else []:
@@ -482,13 +505,39 @@ def verify_sources(root):
             raise SafeError('mail_changed_retry')
     if request['mail']:
         before = read_json(os.path.join(root, 'mail-check.json'), None)
+        boxes={}
+        if mode!='strict':
+            formats_path=os.path.join(root,'mail-formats.json')
+            if os.path.isfile(formats_path):
+                for name,kind in read_json(formats_path,None).items():
+                    if kind=='mbox':boxes[name]=[]
+            for source in read_json(os.path.join(capture_directory(root),'mail','sources.json'),None)['sources']:
+                if source.get('format')=='mbox' or source.get('folder_format')=='mbox':
+                    boxes.setdefault(source['name_bytes_hex'],[]).append(source['path'])
         actual = []
         for name, path, identity in inventory(mail_path(request['mail_template'], request['user'])):
             raw_name = name if isinstance(name, bytes) else name.encode(sys.getfilesystemencoding(), 'surrogateescape')
             actual.append({'name_hex': binascii.hexlify(raw_name).decode('ascii'), 'identity': list(identity)})
-        if actual != before:
-            raise SafeError('mail_changed_retry')
-    write_json(os.path.join(root, 'verified.json'), {'protocol': PROTOCOL, 'ok': True, 'revision': REVISION})
+        if len(actual)!=len(before):raise SafeError('mail_changed_retry')
+        for old,new in zip(before,actual):
+            name=old['name_hex'];identity=old['identity'];current=new['identity']
+            if name!=new['name_hex']:raise SafeError('mail_changed_retry')
+            if identity!=current:
+                # Size growth is provisional: check mode never marks a copy
+                # verified. Copy mode is entered only after the client hashes
+                # every captured byte/range and sends a job-bound receipt.
+                if mode=='strict' or name not in boxes or identity[:2]!=current[:2] or current[2]<=identity[2]:
+                    raise SafeError('mail_changed_retry')
+                result['growth_files']+=1;result['growth_bytes']+=current[2]-identity[2]
+            if mode=='check':
+                for path in boxes.get(name,[]):result['appendable'][path]=identity[2]
+    if mode=='check':
+        write_json(os.path.join(root,'copy-plan.json'),dict(result,protocol='segio-ssh-copy-plan/1',job=os.path.basename(root)))
+    if mode!='check':
+        write_json(os.path.join(root, 'verified.json'), {'protocol': PROTOCOL, 'ok': True, 'revision': REVISION,
+            'verification':'captured-sha256/1' if mode=='copy' else 'source-identity/1',
+            'growth_files':result['growth_files'],'growth_bytes':result['growth_bytes']})
+    return {'growth_files':result['growth_files'],'growth_bytes':result['growth_bytes']}
 
 
 def main():
@@ -497,7 +546,7 @@ def main():
     parser.add_option('--action')
     parser.add_option('--detach', action='store_true')
     options, args = parser.parse_args()
-    if args or not options.root or options.action not in ('prepare', 'verify', 'cleanup'):
+    if args or not options.root or options.action not in ('prepare', 'verify', 'check-copy', 'verify-copy', 'cleanup'):
         parser.error('Use fixed SSH helper actions only.')
     try:
         root, request = private_root(options.root)
@@ -516,6 +565,10 @@ def main():
             prepare(root,apply_limits=True)
         elif options.action == 'verify':
             verify_sources(root)
+        elif options.action in ('check-copy','verify-copy'):
+            result=verify_sources(root,'check' if options.action=='check-copy' else 'copy')
+            print(json.dumps(dict(result,protocol=PROTOCOL,ok=True)))
+            return 0
         else:
             if read_json(os.path.join(root, 'verified.json')).get('ok') is not True:
                 raise SafeError('unsafe_job')
@@ -526,7 +579,7 @@ def main():
             print(json.dumps({'protocol': PROTOCOL, 'ok': True}))
         return 0
     except Exception as exc:
-        stage = {'verify': 'verification', 'cleanup': 'cleanup'}.get(options.action, 'initializing')
+        stage = {'verify':'verification','check-copy':'verification','verify-copy':'verification','cleanup':'cleanup'}.get(options.action, 'initializing')
         code, diagnostic = failure_details(exc, stage)
         # Persist only after ownership and the native request have been checked.
         if 'root' in locals() and 'request' in locals():
