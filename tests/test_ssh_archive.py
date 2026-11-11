@@ -31,6 +31,44 @@ from ssh_fixture import SSHServer
 
 
 class SSHArchiveTests(unittest.TestCase):
+    def test_added_mail_files_before_during_or_after_copy_are_deferred_with_warning(self):
+        for moment in ('before','during','after'):
+            with self.subTest(moment=moment),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp).resolve();server,config,_=self.fixture(root)
+                mailbox=root/'home/e/employee/mbox'
+                source=mailbox/'large.mbox';payload=b'From a@example.test\nSubject: Captured\n\n'+b'x'*(2*1024*1024)
+                source.write_bytes(payload)
+                extra=b'From later@example.test\nSubject: Deferred arrival\n\nLater\n'
+                collector=SSHCollector(config,confirm_host=lambda *_:True)
+                wait=collector.wait_ready;call=collector.io;execute=collector.execute;added=[False]
+                def add():
+                    if not added[0]:
+                        (mailbox/'000-new.mbox').write_bytes(extra)
+                        (mailbox/'new-folder').mkdir();(mailbox/'new-folder/new.eml').write_bytes(extra[extra.index(b'Subject:'):])
+                        added[0]=True
+                def ready():
+                    wait()
+                    if moment=='before':add()
+                def observed(operation,callback,*args,**kwargs):
+                    if moment=='during' and operation=='local_write' and collector.transfer_context.get('file_bytes')==len(payload):add()
+                    return call(operation,callback,*args,**kwargs)
+                def executing(action,detach=False):
+                    if moment=='after' and action=='verify-copy':add()
+                    return execute(action,detach)
+                collector.wait_ready=ready;collector.io=observed;collector.execute=executing
+                with patch.object(helper,'run_export',side_effect=synthetic_export):result=collector.run('SYNTHETIC_SSH_PASSWORD')
+                self.assertTrue(added[0]);self.assertEqual(source.read_bytes(),payload)
+                self.assertIn(payload,[p.read_bytes() for p in (result/'mail/raw').iterdir()])
+                manifest=json.loads((result/'manifest.json').read_text())
+                deferred=next(x for x in manifest['coverage'] if x['kind']=='mail_files_after_capture')
+                self.assertEqual(deferred['files'],2)
+                self.assertEqual(deferred['bytes'],len(extra)+len(extra[extra.index(b'Subject:'):]))
+                self.assertFalse(manifest['account_deletion_verified'])
+                self.assertTrue(any('새 메일 파일' in warning for warning in manifest['warnings']))
+                self.assertEqual(search(result,'Deferred arrival',kind='mail')['total'],0)
+                self.assertTrue(verify_archive(result)['ok']);self.assertEqual(server.actions.count('prepare'),1)
+                self.assertEqual(server.actions[-1],'cleanup')
+
     def test_source_check_does_not_authorize_cleanup_without_valid_copy_receipt(self):
         from export_schema_from_segio_config import SafeError
         with tempfile.TemporaryDirectory() as tmp:
@@ -41,6 +79,7 @@ class SSHArchiveTests(unittest.TestCase):
             with patch.object(helper,'run_export',side_effect=synthetic_export),self.assertRaises(Cancelled):
                 collector.run('SYNTHETIC_SSH_PASSWORD')
             job=server.path(collector.remote)
+            (root/'home/e/employee/mbox/new.mbox').write_bytes(b'From later@example.test\nSubject: Later\n\nLater\n')
             helper.verify_sources(str(job),'check')
             self.assertFalse((job/'verified.json').exists())
             with self.assertRaises((OSError,SafeError)):helper.verify_sources(str(job),'copy')
@@ -94,6 +133,7 @@ class SSHArchiveTests(unittest.TestCase):
             collector=SSHCollector(config,confirm_host=lambda *_:True);wait=collector.wait_ready
             def ready():
                 wait();data=source.read_bytes();source.write_bytes(bytes([data[0]^1])+data[1:]+b'APPENDED')
+                source.with_name('new.mbox').write_bytes(b'From later@example.test\nSubject: Later\n\nLater\n')
             collector.wait_ready=ready
             with patch.object(helper,'run_export',side_effect=synthetic_export),self.assertRaisesRegex(CollectionError,'SSH_FILE_HASH_MISMATCH'):
                 collector.run('SYNTHETIC_SSH_PASSWORD')
@@ -102,7 +142,7 @@ class SSHArchiveTests(unittest.TestCase):
             self.assertNotIn('verify-copy',server.actions);self.assertNotIn('cleanup',server.actions)
 
     def test_changed_identity_truncation_same_size_edit_and_non_mbox_growth_stay_blocked(self):
-        for change in ('replace','truncate','edit','new_file','eml_growth','binary_growth'):
+        for change in ('replace','truncate','edit','remove','rename','replace_with_new','eml_growth','binary_growth'):
             with self.subTest(change=change),tempfile.TemporaryDirectory() as tmp:
                 root=Path(tmp).resolve();server,config,_=self.fixture(root)
                 source=root/'home/e/employee/mbox/inbox.mbox'
@@ -116,7 +156,9 @@ class SSHArchiveTests(unittest.TestCase):
                     elif change=='truncate':source.write_bytes(data[:-1])
                     elif change=='edit':
                         source.write_bytes(bytes([data[0]^1])+data[1:]);stamp=source.stat().st_mtime+5;os.utime(source,(stamp,stamp))
-                    elif change=='new_file':source.with_name('new.mbox').write_bytes(data)
+                    elif change=='remove':source.unlink()
+                    elif change=='rename':source.rename(source.with_name('renamed.mbox'))
+                    elif change=='replace_with_new':source.unlink();source.with_name('new.mbox').write_bytes(data)
                     else:
                         with source.open('ab') as out:out.write(b'new')
                 collector.wait_ready=ready
@@ -558,6 +600,7 @@ class SSHArchiveTests(unittest.TestCase):
                 self.assertEqual(server.actions.count('prepare'),1)
                 self.assertTrue(list(config.output.glob('.segio-ssh-cache/*/session.json')))
                 with source.open('ab') as stream:stream.write(b'\nFrom later@example.test\nSubject: Later arrival\n\nLater\n')
+                source.with_name('000-new.mbox').write_bytes(b'From new@example.test\nSubject: New file\n\nLater\n')
                 config.cancel=threading.Event()
                 reads=len(server.reads)
                 result=SSHCollector(config).run('SYNTHETIC_SSH_PASSWORD')
@@ -566,6 +609,8 @@ class SSHArchiveTests(unittest.TestCase):
             resumed_offsets=[offset for path,offset,_ in server.reads[reads:] if path.endswith('large.mbox')]
             self.assertEqual(min(resumed_offsets),1024*1024)
             self.assertIn(payload,[p.read_bytes() for p in (result/'mail/raw').iterdir()])
+            manifest=json.loads((result/'manifest.json').read_text())
+            self.assertEqual(next(x for x in manifest['coverage'] if x['kind']=='mail_files_after_capture')['files'],1)
 
     def test_unknown_host_and_wrong_password_do_not_start_exports(self):
         with tempfile.TemporaryDirectory() as tmp:

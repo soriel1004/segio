@@ -664,13 +664,21 @@ class SSHCollector(TransferRecovery):
                 type(size) is not int or size<0 for key,size in values.items()):
             raise CollectionError('메일 스냅샷 범위 응답을 확인하지 못했습니다. [SSH_HELPER_RESPONSE]')
         self.appendable=values
+        added=result.get('added_files',0)
+        if type(added) is int and added>getattr(self,'added_mail_files_seen',0):
+            self.log(f'서버 준비 후 새 메일 파일 {added:,}개 확인 · 준비 당시 원본 전송을 계속합니다.')
+            self.added_mail_files_seen=added
 
     def verify_copy(self):
         temporary=self.remote+'/copy-receipt.json.tmp'
         with self.sftp.open(temporary,'wb') as stream:stream.write(json.dumps(self.copy_receipt).encode('utf-8'))
         self.sftp.chmod(temporary,0o600)
         self.sftp.posix_rename(temporary,self.remote+'/copy-receipt.json')
-        return self.execute('verify-copy')
+        result=self.execute('verify-copy')
+        if any(type(result.get(key,0)) is not int or result.get(key,0)<0
+               for key in ('growth_files','growth_bytes','added_files','added_bytes')):
+            raise CollectionError('메일 스냅샷 검증 응답을 확인하지 못했습니다. [SSH_HELPER_RESPONSE]')
+        return result
 
     def run(self,password):
         self.config.validate()
@@ -723,6 +731,12 @@ class SSHCollector(TransferRecovery):
                         local_manifest.setdefault('coverage',[]).append({'kind':'mail_growth_after_capture',
                             'files':coverage['growth_files'],'bytes':coverage['growth_bytes'],'captured_at':self.copy_scope['mail']})
                         warning='백업 준비 후 메일 원본이 증가했습니다. 이번 백업은 준비 당시 범위까지 보관하며 이후 메일은 추가 백업이 필요합니다.'
+                        local_manifest.setdefault('warnings',[]).insert(0,warning);self.log(warning)
+                    if coverage.get('added_files',0):
+                        local_manifest['state']='collected_with_warnings'
+                        local_manifest.setdefault('coverage',[]).append({'kind':'mail_files_after_capture',
+                            'files':coverage['added_files'],'bytes':coverage['added_bytes'],'captured_at':self.copy_scope['mail']})
+                        warning=f'백업 준비 후 새 메일 파일 {coverage["added_files"]:,}개가 확인되었습니다. 이번 백업은 준비 당시 파일만 포함합니다. 새 파일은 다음 추가 백업의 날짜 범위에 맞춰 대조하세요.'
                         local_manifest.setdefault('warnings',[]).insert(0,warning);self.log(warning)
                 save(contents/'manifest.json',local_manifest)
                 self.phase='Windows 검색 색인 생성'

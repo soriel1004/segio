@@ -287,8 +287,8 @@ def merge(base,incoming,stage,checkpoint=lambda:None,log=lambda _:None,progress=
     result['retained_ssh_jobs']=list(dict.fromkeys(old.get('retained_ssh_jobs',[])+[old['ssh_export']['job']]))
     prior_warnings=old.get('warnings',[])
     if new['ssh_export'].get('mail_capture')=='captured-sha256/1':
-        prior_warnings=[value for value in prior_warnings if not value.startswith('백업 준비 후 메일 원본이 증가했습니다.')]
-        scope_kinds={'mail_snapshot_scope','mail_growth_after_capture'}
+        prior_warnings=[value for value in prior_warnings if not value.startswith(('백업 준비 후 메일 원본이 증가했습니다.','백업 준비 후 새 메일 파일 '))]
+        scope_kinds={'mail_snapshot_scope','mail_growth_after_capture','mail_files_after_capture'}
         result['coverage']=[value for value in result.get('coverage',[]) if value.get('kind') not in scope_kinds]
         result['coverage'].extend(value for value in new.get('coverage',[]) if value.get('kind') in scope_kinds)
     result['warnings']=list(dict.fromkeys(prior_warnings+new.get('warnings',[])))

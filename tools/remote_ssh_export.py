@@ -22,7 +22,7 @@ from live_export_worker import (read_json, write_json, check_user, mail_path, in
                                 fingerprint, file_identity, failure_details as worker_failure_details)
 
 PROTOCOL = 'segio-ssh-archive/1'
-REVISION = 'ssh-bounded-encoding-9'
+REVISION = 'ssh-captured-file-set-10'
 
 
 def memory_info():
@@ -540,7 +540,7 @@ def verify_sources(root, mode='strict'):
                 receipt.get('files')!=ready.get('files') or receipt.get('bytes')!=ready.get('bytes') or
                 receipt.get('manifest_sha256')!=hash_file(os.path.join(capture_directory(root),'manifest.json'))['sha256']):
             raise SafeError('invalid_metadata')
-    result={'appendable':{},'growth_files':0,'growth_bytes':0}
+    result={'appendable':{},'growth_files':0,'growth_bytes':0,'added_files':0,'added_bytes':0}
     # These lists are generated inside this owned private job. They routinely
     # exceed the 64 KiB bound used for untrusted requests/control messages.
     for entry in read_json(os.path.join(root, 'approval-check.json'), None) if os.path.isfile(os.path.join(root, 'approval-check.json')) else []:
@@ -558,14 +558,20 @@ def verify_sources(root, mode='strict'):
             for source in read_json(os.path.join(capture_directory(root),'mail','sources.json'),None)['sources']:
                 if source.get('format')=='mbox' or source.get('folder_format')=='mbox':
                     boxes.setdefault(source['name_bytes_hex'],[]).append(source['path'])
-        actual = []
+        actual = {}
         for name, path, identity in inventory(mail_path(request['mail_template'], request['user'])):
             raw_name = name if isinstance(name, bytes) else name.encode(sys.getfilesystemencoding(), 'surrogateescape')
-            actual.append({'name_hex': binascii.hexlify(raw_name).decode('ascii'), 'identity': list(identity)})
-        if len(actual)!=len(before):raise SafeError('mail_changed_retry')
-        for old,new in zip(before,actual):
-            name=old['name_hex'];identity=old['identity'];current=new['identity']
-            if name!=new['name_hex']:raise SafeError('mail_changed_retry')
+            actual[binascii.hexlify(raw_name).decode('ascii')] = list(identity)
+        captured=set(entry['name_hex'] for entry in before)
+        if len(captured)!=len(before) or not captured.issubset(actual):raise SafeError('mail_changed_retry')
+        if mode=='strict' and len(actual)!=len(before):raise SafeError('mail_changed_retry')
+        # Later files are outside this prepared capture. Keep its full file
+        # set mandatory, without comparing sorted positions shifted by arrivals.
+        for name in actual:
+            if name not in captured:
+                result['added_files']+=1;result['added_bytes']+=actual[name][2]
+        for old in before:
+            name=old['name_hex'];identity=old['identity'];current=actual[name]
             if identity!=current:
                 # Size growth is provisional: check mode never marks a copy
                 # verified. Copy mode is entered only after the client hashes
@@ -580,8 +586,9 @@ def verify_sources(root, mode='strict'):
     if mode!='check':
         write_json(os.path.join(root, 'verified.json'), {'protocol': PROTOCOL, 'ok': True, 'revision': REVISION,
             'verification':'captured-sha256/1' if mode=='copy' else 'source-identity/1',
-            'growth_files':result['growth_files'],'growth_bytes':result['growth_bytes']})
-    return {'growth_files':result['growth_files'],'growth_bytes':result['growth_bytes']}
+            'growth_files':result['growth_files'],'growth_bytes':result['growth_bytes'],
+            'added_files':result['added_files'],'added_bytes':result['added_bytes']})
+    return dict((key,result[key]) for key in ('growth_files','growth_bytes','added_files','added_bytes'))
 
 
 def main():

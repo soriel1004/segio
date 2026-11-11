@@ -24,6 +24,26 @@ import remote_ssh_export as helper
 
 
 class BackupUpdateTests(unittest.TestCase):
+    def test_new_mail_file_after_capture_is_visible_in_next_date_selected_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();server,config=self.fixture(root)
+            mailbox=root/'home/e/employee/mbox'
+            collector=SSHCollector(config,confirm_host=lambda *_:True);wait=collector.wait_ready
+            extra=self.message('New file after capture',formatdate(usegmt=True))
+            def ready():
+                wait();(mailbox/'000-new.mbox').write_bytes(extra)
+            collector.wait_ready=ready
+            with patch.object(helper,'run_export',side_effect=synthetic_export):
+                first=collector.run('SYNTHETIC_SSH_PASSWORD')
+                self.assertEqual(search(first,'New file after capture',kind='mail')['total'],0)
+                self.assertEqual(next(x for x in load(first/'manifest.json')['coverage'] if x['kind']=='mail_files_after_capture')['files'],1)
+                result=SSHCollector(config).run('SYNTHETIC_SSH_PASSWORD')
+            self.assertEqual(search(result,'New file after capture',kind='mail')['total'],1)
+            manifest=load(result/'manifest.json')
+            self.assertFalse(any(x['kind']=='mail_files_after_capture' for x in manifest['coverage']))
+            self.assertFalse(any('백업 준비 후 새 메일 파일 ' in x for x in manifest['warnings']))
+            self.assertTrue(verify_archive(result)['ok'])
+
     def test_mailbox_without_selected_delta_ranges_can_grow_and_next_backup_catches_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp).resolve();server,config=self.fixture(root)

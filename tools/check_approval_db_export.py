@@ -221,9 +221,13 @@ def main():
                 assert (legacy_root/'verified.json').is_file()
                 print('PASS: actual Python 2.6 SSH DB/MBOX preparation and verification')
                 (legacy_root/'verified.json').unlink()
+                (mailbox/'000-new.mbox').write_bytes(b'From new@example.test\nSubject: New file\n\nLater\n')
+                result=subprocess.run(command[:-1]+['verify'],capture_output=True,timeout=60)
+                assert result.returncode!=0,'Strict verification must still reject a changed file set'
                 with (mailbox/'inbox.mbox').open('ab') as stream:stream.write(b'\nFrom later@example.test\nSubject: Later mail\n\nLater\n')
                 result=subprocess.run(command[:-1]+['check-copy'],capture_output=True,timeout=60)
                 assert result.returncode==0,'Python 2.6 captured-mail preflight failed'
+                assert json.loads(result.stdout)['added_files']==1
                 assert not (legacy_root/'verified.json').exists()
                 capture=worker.read_json(str(legacy_root/'transfer.json'),None)
                 for item in capture['files']:
@@ -241,8 +245,9 @@ def main():
                 result=subprocess.run(command[:-1]+['verify-copy'],capture_output=True,timeout=60)
                 assert result.returncode==0,'Python 2.6 captured-mail receipt verification failed'
                 assert json.loads(result.stdout)['growth_files']==1
+                assert json.loads(result.stdout)['added_files']==1
                 assert worker.read_json(str(legacy_root/'verified.json'))['verification']=='captured-sha256/1'
-                print('PASS: actual Python 2.6 captured MBOX prefix, growth and copy receipt')
+                print('PASS: actual Python 2.6 captured MBOX prefix, growth, deferred new files, strict file-set guard and copy receipt')
             worker.write_json(str(job/'request.json'), {'username':'target','approvals':True,'mail':False,'created_at':1})
             worker.run_job(str(live_root/'config.json'), job_id)
             status = worker.read_json(str(job/'status.json'))
